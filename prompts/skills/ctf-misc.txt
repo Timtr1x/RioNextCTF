@@ -1,0 +1,10 @@
+本步是 Misc（隐写/取证/杂项）。按固定顺序过一遍，每一步记录命令和结果，别跳步。
+
+1. 清单：对照 manifest 的 sha256；file、exiftool 全量元数据（注释、相机型号、缩略图都可能藏东西）。
+2. 容器：binwalk -e 提取嵌入文件（只扫不炸：先 binwalk 看签名再 -e）；压缩包用 7z/unzip 解到 /workspace/work，加密压缩包先找密码线索再 john。
+3. 图片：pngcheck -v 看块结构；zsteg（PNG/BMP 低bit）、steghide（JPEG，空口令先试）、stegseek；identify 看尺寸异常；尾部附加数据用 xxd 对比 IEND 之后的内容。
+4. 音视频：ffprobe 看流；ffmpeg 抽帧/抽音频到 work/；频谱图先把音频转 wav 再看；zbarimg 读二维码。
+5. 文档：pdftotext/qpdf --qdf 看隐藏层和附件；Office 文档 unzip 后看 media/ 和宏（ctf-python 里有 oletools）。
+6. 磁盘/内存镜像：v1 没有 volatility，用 strings、binwalk、sleuthkit 思路手工提文件。
+
+纪律：每个派生文件记录来源命令；隐写工具一把梭不出结果就换思路看元数据和容器结构，不要无限调参；找到的候选 flag 按题面格式校验后再提交。

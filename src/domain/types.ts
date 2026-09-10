@@ -1,3 +1,6 @@
+import type { ChallengeInfo } from "./challenge-kind.ts";
+export type { ChallengeInfo } from "./challenge-kind.ts";
+
 export type CampaignMode = "goal_seeking" | "assessment";
 
 export type CampaignState =
@@ -170,6 +173,8 @@ export interface CampaignSpec {
   artifact_policy: ArtifactPolicy;
   stop_policy: StopPolicy;
   environment_revision: string;
+  /** Present only for campaigns created from --input (local CTF attachments). */
+  challenge?: ChallengeInfo;
 }
 
 export interface CampaignRecord {

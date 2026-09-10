@@ -1,0 +1,9 @@
+本步是流量分析（PCAP/PCAPNG）。
+
+1. 概览：capinfos 或 tshark -r file -q -z io,phs 看协议分布；-z conv,tcp / conv,udp 列会话。
+2. 按协议过滤：tshark -r file -Y 'http' / 'dns' / 'ftp-data' 等；DNS 查询名、HTTP Host/URI 常直接藏 flag 或指向载荷。
+3. 提取对象：tshark -r file --export-objects http,work/ （或 smb、dicom）；导出的文件按 ctf-misc 流程继续查。
+4. 原始字节：tshark -r file -Y tcp.stream eq N -T fields -e data 拿 hex，xxd -r -p 还原后 file 识别。
+5. 键盘/USB/无线等专项流量：按协议字段（usbhid、wlan）提键值映射；写 python 解码，脚本留 /workspace/work。
+
+纪律：每个提取文件注明来源流（协议 + stream 号）；大文件先看统计再深挖，不要顺序人肉翻包。

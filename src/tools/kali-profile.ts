@@ -14,7 +14,33 @@ export function isProtectedImageRef(ref: string): boolean {
   return t === "rionext-kali" || t.startsWith("rionext-kali:");
 }
 
-export const KALI_BINARIES = new Set([
+/**
+ * Allowlists are composed per challenge kind. BASE+WEB must stay byte-identical
+ * to the legacy flat KALI_BINARIES set; CTF kinds add their own tools on top of
+ * BASE so a Web campaign never sees reverse/misc/crypto binaries.
+ */
+export const BASE_BINS = new Set([
+  "cat",
+  "head",
+  "tail",
+  "ls",
+  "find",
+  "grep",
+  "rg",
+  "wc",
+  "file",
+  "bash",
+  "sh",
+  "python3",
+  "mkdir",
+  "chmod",
+  "tee",
+  "rm",
+  "cp",
+  "mv",
+]);
+
+export const WEB_BINS = new Set([
   "nmap",
   "curl",
   "wget",
@@ -37,27 +63,118 @@ export const KALI_BINARIES = new Set([
   "chisel",
   "chromium",
   "chromium-browser",
-  "cat",
-  "head",
-  "tail",
-  "ls",
-  "find",
-  "grep",
-  "rg",
-  "wc",
-  "file",
-  "bash",
-  "sh",
-  "python3",
-  "mkdir",
-  "chmod",
-  "tee",
-  "rm",
-  "cp",
-  "mv",
 ]);
 
-export const KALI_INTERPRETERS = new Set(["bash", "sh", "python3"]);
+/** Shared by every non-web CTF kind: hex/encoding/archive basics. */
+export const CTF_BASE_BINS = new Set([
+  "xxd",
+  "hexdump",
+  "od",
+  "sha256sum",
+  "md5sum",
+  "strings",
+  "zip",
+  "unzip",
+  "7z",
+  "tar",
+  "ctf-python",
+]);
+
+export const BINARY_BINS = new Set([
+  "readelf",
+  "objdump",
+  "nm",
+  "ldd",
+  "gdb",
+  "gdbserver",
+  "checksec",
+  "r2",
+  "rabin2",
+  "rasm2",
+  "radiff2",
+  "strace",
+  "ltrace",
+  "patchelf",
+  "qemu-x86_64",
+  "qemu-i386",
+  "qemu-arm",
+  "qemu-aarch64",
+  "ROPgadget",
+  "ropper",
+  "one_gadget",
+  "gcc",
+  "g++",
+  "make",
+  "socat",
+  "nc",
+  "ncat",
+]);
+
+export const MISC_BINS = new Set([
+  "binwalk",
+  "foremost",
+  "exiftool",
+  "steghide",
+  "stegseek",
+  "zsteg",
+  "pngcheck",
+  "identify",
+  "convert",
+  "ffmpeg",
+  "ffprobe",
+  "zbarimg",
+  "tesseract",
+  "zipinfo",
+  "qpdf",
+  "pdfinfo",
+  "pdftotext",
+  "pdftoppm",
+  "tshark",
+  "tcpdump",
+  "capinfos",
+  "john",
+]);
+
+export const CRYPTO_BINS = new Set(["openssl", "john", "hashcat", "gp"]);
+
+function union(...sets: ReadonlySet<string>[]): Set<string> {
+  const out = new Set<string>();
+  for (const s of sets) for (const b of s) out.add(b);
+  return out;
+}
+
+/** Legacy flat web allowlist. Exactly BASE+WEB; do not add CTF tools here. */
+export const KALI_BINARIES = union(BASE_BINS, WEB_BINS);
+
+/**
+ * Binary set for a challenge kind. "web" is the legacy set; unknown kinds fall
+ * back to the broad CTF union (never used for web campaigns, which carry no
+ * spec.challenge and default to "web" at the call site).
+ */
+export function allowedBinsFor(kind: string): ReadonlySet<string> {
+  switch (kind) {
+    case "web":
+      return KALI_BINARIES;
+    case "reverse":
+    case "pwn":
+      return union(BASE_BINS, CTF_BASE_BINS, BINARY_BINS);
+    case "misc":
+      return union(BASE_BINS, CTF_BASE_BINS, MISC_BINS);
+    case "crypto":
+      return union(BASE_BINS, CTF_BASE_BINS, CRYPTO_BINS);
+    default:
+      return union(BASE_BINS, CTF_BASE_BINS, BINARY_BINS, MISC_BINS, CRYPTO_BINS, new Set(["curl", "wget"]));
+  }
+}
+
+/** Any binary known to any profile; used only for payload routing, not admission. */
+export function isKnownKaliBin(bin: string): boolean {
+  if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
+  if (allowedBinsFor("generic").has(bin) || KALI_BINARIES.has(bin)) return true;
+  return bin.startsWith("impacket-");
+}
+
+export const KALI_INTERPRETERS = new Set(["bash", "sh", "python3", "ctf-python"]);
 export const KALI_PATH_BINS = new Set(["mkdir", "chmod", "tee", "rm", "cp", "mv"]);
 /** Scanners that must not block the Execute slot. Detached docker exec + poll. */
 export const KALI_BACKGROUND_BINS = new Set([
@@ -81,6 +198,13 @@ export function isAllowedKaliBin(bin: string): boolean {
   if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
   if (KALI_BINARIES.has(bin)) return true;
   return bin.startsWith("impacket-");
+}
+
+/** Per-kind admission: set membership, with the impacket- prefix reserved for web. */
+export function isAllowedKaliBinFor(bin: string, kind: string): boolean {
+  if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
+  if (allowedBinsFor(kind).has(bin)) return true;
+  return kind === "web" && bin.startsWith("impacket-");
 }
 
 /** Relative path under /workspace. Absolute paths must start with /workspace/. */
@@ -144,9 +268,14 @@ export function shouldBackgroundKali(bin: string, _timeoutMs?: number): boolean 
   return KALI_BACKGROUND_BINS.has(bin);
 }
 
-export function assertKaliArgv(bin: string, args: string[]): void {
-  if (!isAllowedKaliBin(bin)) {
-    argvDenied(`kali binary not allowlisted: ${bin}`);
+/**
+ * @param kind challenge kind for the campaign; undefined keeps legacy web
+ * behavior (KALI_BINARIES + impacket- prefix).
+ */
+export function assertKaliArgv(bin: string, args: string[], kind?: string): void {
+  const allowed = kind === undefined ? isAllowedKaliBin(bin) : isAllowedKaliBinFor(bin, kind);
+  if (!allowed) {
+    argvDenied(`kali binary not allowlisted${kind ? ` for ${kind}` : ""}: ${bin}`);
   }
   if (KALI_INTERPRETERS.has(bin)) {
     assertInterpreterArgv(args);

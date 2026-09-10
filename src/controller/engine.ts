@@ -182,6 +182,7 @@ export class Engine {
       allowAssets: allow,
       network: allow.length ? "allowlist" : "none",
       resolve: this.options.kaliResolve,
+      challengeKind: camp.spec.challenge?.kind ?? "web",
     };
   }
 

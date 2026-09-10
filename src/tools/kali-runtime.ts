@@ -28,6 +28,8 @@ export interface KaliStartOpts {
   network: "none" | "allowlist" | "bridge";
   image?: string;
   resolve?: ResolveFn;
+  /** Challenge kind drives the binary allowlist; absent means legacy web. */
+  challengeKind?: string;
 }
 
 export interface ContainerSpec {
@@ -359,11 +361,14 @@ export class KaliRuntime {
     args: string[],
     extra?: { url?: string; redirects?: string[]; timeout_ms?: number; executionId?: string; background?: boolean },
   ): DockerExecResult & { truncated: boolean; container: string; pending?: boolean } {
-    assertKaliArgv(bin, args);
+    assertKaliArgv(bin, args, opts.challengeKind ?? "web");
     const allow = parseAllowList(opts.allowAssets);
     const resolve = opts.resolve ?? ((h: string) => defaultResolve(h));
     if (extra?.url) this.admitNet(extra.url, allow, resolve, extra.redirects ?? []);
-    else if (looksLikeHostArg(args)) {
+    else if (TCP_CLIENT_BINS.has(bin)) {
+      const dest = tcpDestFromArgs(bin, args);
+      if (dest) this.admitNet(dest, allow, resolve, []);
+    } else if (looksLikeHostArg(args)) {
       const dest = args.find((a) => a.includes(".") && !a.startsWith("-"));
       if (dest) this.admitNet(dest, allow, resolve, []);
     }
@@ -565,6 +570,30 @@ function looksLikeHostArg(args: string[]): boolean {
       /^\d{1,3}(\.\d{1,3}){3}/.test(a) ||
       (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(a) && !a.startsWith("-")),
   );
+}
+
+/** nc/ncat/socat take raw host+port args; pair them so the port is egress-checked. */
+const TCP_CLIENT_BINS = new Set(["nc", "ncat", "socat"]);
+
+function tcpDestFromArgs(bin: string, args: string[]): string | null {
+  if (bin === "socat") {
+    for (const a of args) {
+      const m = a.match(/^TCP[46]?:([A-Za-z0-9.-]+):(\d{1,5})$/);
+      if (m) return `tcp://${m[1]}:${m[2]}`;
+    }
+    return null;
+  }
+  let host: string | null = null;
+  let port: string | null = null;
+  for (const a of args) {
+    if (a.startsWith("-")) continue;
+    if (/^\d{1,5}$/.test(a)) {
+      if (!port) port = a;
+      continue;
+    }
+    if (!host && /^[A-Za-z0-9.-]+$/.test(a)) host = a;
+  }
+  return host && port ? `tcp://${host}:${port}` : null;
 }
 
 function shQuote(s: string): string {

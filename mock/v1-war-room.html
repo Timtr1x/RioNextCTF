@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>RioNext v1 战情室</title>
+<style>
+:root{--bg:#16140f;--bg2:#1e1b15;--bg3:#12100c;--line:#3a3428;--paper:#efe6d2;--dim:#7a7264;--amber:#d97706;--amber2:#f59e0b;--ok:#6ee7a8;--bad:#fb7185;--blue:#7dd3fc;--mono:"IBM Plex Mono","Cascadia Mono",ui-monospace,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--paper);font-family:var(--mono);font-size:13px;line-height:1.5}
+h1,h2,h3{font-weight:500}
+a{color:var(--amber2)}
+button{font:inherit;background:var(--amber);color:#1c1408;border:0;padding:6px 10px;cursor:pointer;border-radius:2px}
+button.ghost{background:transparent;color:var(--paper);border:1px solid var(--line)}
+button.ghost:hover{border-color:var(--amber)}
+button.sm{padding:2px 7px;font-size:11px}
+button.warn{background:transparent;color:var(--bad);border:1px solid #5c2a2a}
+button:disabled{opacity:.4;cursor:not-allowed}
+input,select,textarea{font:inherit;background:var(--bg3);color:var(--paper);border:1px solid #4a4336;padding:6px 8px;border-radius:2px;width:100%}
+header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--bg2)}
+header .logo{font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber2)}
+header .sub{color:var(--dim);font-size:11px}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);padding:2px 8px;border-radius:2px;font-size:11px;color:var(--dim);background:var(--bg3)}
+.lamp{width:7px;height:7px;border-radius:50%;background:#4a4336;display:inline-block}
+.lamp.ok{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.lamp.bad{background:var(--bad)}
+.lamp.warn{background:var(--amber2)}
+header .spacer{flex:1}
+main{display:grid;grid-template-columns:270px 1fr 330px;gap:0;min-height:calc(100vh - 42px)}
+.col{border-right:1px solid var(--line);min-width:0}
+.col.right{border-right:0}
+.col-head{padding:8px 12px;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--amber);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.col-head .act{color:var(--dim);cursor:pointer;text-transform:none;letter-spacing:0}
+.col-head .act:hover{color:var(--amber2)}
+.pad{padding:10px 12px}
+.camp-item{padding:8px 12px;border-bottom:1px solid #262218;cursor:pointer}
+.camp-item:hover{background:var(--bg2)}
+.camp-item.sel{background:#241f15;border-left:2px solid var(--amber)}
+.camp-item .id{font-size:12px}
+.camp-item .row2{display:flex;gap:6px;align-items:center;font-size:10px;color:var(--dim);margin-top:2px}
+.badge{display:inline-block;font-size:10px;padding:0 6px;border:1px solid var(--line);border-radius:2px;color:var(--dim)}
+.badge.s-active{color:var(--ok);border-color:#2c4a36}
+.badge.s-awaiting_verify{color:var(--amber2);border-color:#5a3c12}
+.badge.s-budget_paused{color:var(--blue);border-color:#1f4252}
+.badge.s-blocked{color:var(--bad);border-color:#5c2a2a}
+.badge.s-completed{color:var(--ok);border-color:#2c4a36;background:#1a231b}
+.badge.s-cancelled{color:#8a8171;text-decoration:line-through}
+.badge.s-plateau,.badge.s-waiting,.badge.s-paused,.badge.s-created,.badge.s-closing{color:var(--dim)}
+.pending-dot{width:8px;height:8px;border-radius:50%;background:var(--amber2);box-shadow:0 0 6px var(--amber2);display:inline-block;margin-left:4px}
+.barm{height:3px;background:#2a2519;margin-top:5px;border-radius:2px;overflow:hidden;display:flex}
+.barm i{background:var(--amber);height:100%}
+.barm i.t{background:var(--blue)}
+.card{background:var(--bg2);border:1px solid var(--line);padding:10px 12px;margin-bottom:10px}
+.card h3{margin:0 0 8px;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--amber)}
+.kv{display:flex;justify-content:space-between;font-size:12px;padding:2px 0}
+.kv .k{color:var(--dim)}
+.gauge{margin:6px 0}
+.gauge .lbl{display:flex;justify-content:space-between;font-size:11px;color:var(--dim)}
+.gauge .bar{height:8px;background:var(--bg3);border:1px solid var(--line);margin-top:3px;border-radius:2px;overflow:hidden;display:flex}
+.gauge .bar i{height:100%}
+.i-spend{background:var(--amber)}
+.i-res{background:#5b4a1e}
+.i-over{background:var(--bad)}
+.pct-row{display:flex;gap:10px;align-items:baseline;margin:4px 0}
+.pct-row .n{font-size:20px;color:var(--paper)}
+.pct-row .d{font-size:10px;color:var(--dim)}
+.stream{overflow-y:auto}
+.inv{padding:5px 12px;border-bottom:1px solid #221e16;font-size:12px}
+.inv .top{display:flex;gap:8px;align-items:center}
+.inv .t{color:var(--dim);font-size:10px}
+.inv .kind-m{color:var(--blue)}
+.inv .kind-t{color:var(--ok)}
+.inv .purpose{color:var(--paper)}
+.inv .state{margin-left:auto;font-size:10px}
+.inv .st-completed{color:var(--dim)}
+.inv .st-running{color:var(--ok)}
+.inv .st-uncertain,.inv .st-failed_known{color:var(--bad)}
+.inv .meta{font-size:10px;color:var(--dim);padding-left:2px}
+.tag{font-size:10px;border:1px solid var(--line);padding:0 5px;border-radius:2px;color:var(--dim)}
+.tag.trunc{color:var(--amber2);border-color:#5a3c12}
+.tag.err{color:var(--bad);border-color:#5c2a2a}
+.toolbar{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap;background:var(--bg2)}
+.tabbar{display:flex;border-top:1px solid var(--line);background:var(--bg2)}
+.tabbar .tab{padding:7px 14px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);cursor:pointer;border-right:1px solid var(--line)}
+.tabbar .tab.on{color:var(--amber2);background:var(--bg);border-top:2px solid var(--amber)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);font-weight:400}
+td{padding:5px 10px;border-bottom:1px solid #221e16;vertical-align:top}
+td .mut{color:var(--dim)}
+tr.click{cursor:pointer}
+tr.click:hover{background:var(--bg2)}
+.jack{display:flex;justify-content:space-between;align-items:center;gap:6px;border:1px dashed #4a4336;padding:5px 8px;font-size:11px;margin-bottom:6px}
+.jack select{width:150px}
+.modal-mask{position:fixed;inset:0;background:#000a;display:none;align-items:flex-start;justify-content:center;z-index:50;overflow:auto;padding:40px 20px}
+.modal-mask.open{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--line);width:760px;max-width:100%;padding:16px 20px}
+.modal h2{margin:0 0 4px;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber2)}
+.modal .close{float:right;cursor:pointer;color:var(--dim)}
+.modal .close:hover{color:var(--bad)}
+.frow{display:grid;grid-template-columns:130px 1fr;gap:8px;align-items:center;margin:7px 0}
+.frow label{color:var(--dim);font-size:11px}
+pre{white-space:pre-wrap;word-break:break-all;background:var(--bg3);border:1px solid var(--line);padding:10px;font-size:11px;margin:8px 0;max-height:300px;overflow:auto;color:#d6cbb3}
+.toast{position:fixed;bottom:18px;right:18px;z-index:99;display:none;max-width:560px}
+.toast pre{margin:0;border-color:var(--amber)}
+.toast .cap{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#2a2213;border:1px solid var(--amber);border-bottom:0;font-size:10px;color:var(--amber2)}
+.logbox{background:var(--bg3);border:1px solid var(--line);padding:8px;font-size:11px;max-height:220px;overflow:auto;color:#9a917d}
+.logbox .line.ok{color:var(--ok)}
+.logbox .line.err{color:var(--bad)}
+.progbar{border-top:1px solid var(--line);background:#0e0c08;padding:5px 12px;font-size:11px;color:#8a817d;white-space:pre;overflow-x:auto}
+.progbar .on{color:var(--dim)}
+.tabs-sub{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
+.tabs-sub .sub{font-size:10px;padding:2px 8px;border:1px solid var(--line);cursor:pointer;color:var(--dim)}
+.tabs-sub .sub.on{color:var(--amber2);border-color:var(--amber)}
+.evi{font-size:11px;color:#b0a68d;padding:1px 0 1px 12px;border-left:2px solid var(--line);margin:3px 0}
+.mini{font-size:10px;color:var(--dim)}
+.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mt{margin-top:10px}
+.right-stack{overflow-y:auto;max-height:calc(100vh - 42px - 60px)}
+.center-stack{display:flex;flex-direction:column;height:calc(100vh - 42px - 60px)}
+.center-tabs{border-bottom:1px solid var(--line);background:var(--bg2);display:flex}
+.center-tabs .tab{padding:6px 14px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);cursor:pointer;border-right:1px solid var(--line)}
+.center-tabs .tab.on{color:var(--amber2);background:var(--bg);border-bottom:2px solid var(--amber)}
+.stream-wrap{flex:1;overflow-y:auto;min-height:120px}
+.tabbody{max-height:44vh;overflow:auto;border-top:0}
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">rionext 战情室</span>
+  <span class="sub">mock · 静态演示 · 动作只回显 CLI 命令</span>
+  <span class="chip"><span class="lamp ok"></span>docker ok</span>
+  <span class="chip"><span class="lamp ok"></span>kali master ok</span>
+  <span class="chip"><span class="lamp warn"></span>keeper running</span>
+  <span class="chip" id="chip-data">.rionext</span>
+  <span class="chip">schema v1</span>
+  <span class="spacer"></span>
+  <button class="ghost" onclick="openWizard()">＋ 新战役</button>
+  <button class="ghost" onclick="toast('rionext backup --out D:\\\\backups\\\\rionext-20260910')">备份</button>
+</header>
+
+<main>
+  <div class="col">
+    <div class="col-head">战役 <span class="act" onclick="toast('rionext list --json')">rionext list</span></div>
+    <div id="camp-list"></div>
+    <div class="col-head mt">Kali 镜像 <span class="act" onclick="toast('rionext ? kali')">? kali</span></div>
+    <div class="pad" id="kali-panel"></div>
+    <div class="col-head mt">供应商与槽位 <span class="act" onclick="toast('rionext provider list')">provider list</span></div>
+    <div class="pad" id="provider-panel"></div>
+  </div>
+
+  <div class="col center-stack">
+    <div class="toolbar" id="camp-toolbar"></div>
+    <div id="camp-head" class="pad"></div>
+    <div class="center-tabs" id="center-tabs"></div>
+    <div class="stream-wrap" id="center-body"></div>
+    <div class="tabbar" id="tabbar"></div>
+    <div class="tabbody" id="tab-body"></div>
+    <div class="progbar" id="prog" onclick="toggleProg()" title="点击开关进度行（等价 --progress-ms 0）"></div>
+  </div>
+
+  <div class="col col-right">
+    <div class="col-head">预算与收卷 <span class="act" onclick="reviseBudget()">revise-budget</span></div>
+    <div class="pad right-stack" id="right-stack"></div>
+  </div>
+</main>
+
+<div class="modal-mask" id="modal-mask"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"><div class="cap"><span id="toast-cap">CLI 等价命令</span><span><span style="cursor:pointer;margin-right:10px" onclick="copyToast()">复制</span><span style="cursor:pointer" onclick="hideToast()">✕</span></span></div><pre id="toast-cmd"></pre></div>
+
+<script>
+/* ---------- mock 数据（按真实 schema 造） ---------- */
+const PROBE_OK = {at:"2026-09-09T21:04:11Z",auth:{ok:true,detail:"200 in 412ms"},text:{ok:true,detail:"echo round-trip ok"},tools:{ok:true,detail:"tool_call accepted"},vision:{ok:false,detail:"400: image input not supported by deepseek-v4-flash"},reasoning:{ok:true,detail:"reasoning_content present"},variants:[{name:"stream",ok:true,detail:"sse ok"},{name:"usage",ok:true,detail:"prompt/completion tokens present"}]};
+
+const PROVIDERS=[
+ {id:"prv_d5754c0c",display_name:"Baidu Qianfan",protocol:"OPENAI_CHAT_COMPLETIONS",base_url:"https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions",key_set:true,models:[{id:"mdl_qf_ernie",name:"ernie-5.0-turbo",ctx:128000,out:16384,vision:true,avail:true}]},
+ {id:"prv_a80bad3e",display_name:"OpenCode Go",protocol:"OPENAI_CHAT_COMPLETIONS",base_url:"https://opencode.ai/zen/go/v1/chat/completions",key_set:true,models:[{id:"mdl_ds_v4f",name:"deepseek-v4-flash",ctx:1000000,out:51200,vision:false,avail:true,probe:PROBE_OK},{id:"mdl_ds_v4",name:"deepseek-v4.2",ctx:1000000,out:51200,vision:false,avail:true}]},
+ {id:"prv_996803e2",display_name:"OpenCode Go Responses",protocol:"OPENAI_RESPONSES",base_url:"https://opencode.ai/zen/go/v1/responses",key_set:false,models:[]},
+ {id:"prv_6f31a9b0",display_name:"Anthropic 官方",protocol:"ANTHROPIC_MESSAGES",base_url:"https://api.anthropic.com",key_set:true,models:[{id:"mdl_claude_sonnet",name:"claude-sonnet-4-6",ctx:256000,out:51200,vision:true,avail:true}]}];
+
+const SLOTS=[
+ {slot:"solver",label:"主求解",model:"deepseek-v4-flash",model_id:"mdl_ds_v4f",provider:"OpenCode Go"},
+ {slot:"visual",label:"视觉",model:"claude-sonnet-4-6",model_id:"mdl_claude_sonnet",provider:"Anthropic 官方"},
+ {slot:"reflect",label:"反思",model:null,model_id:null,provider:null},
+ {slot:"triage",label:"Triage",model:null,model_id:null,provider:null},
+ {slot:"manager",label:"Manager",model:null,model_id:null,provider:null}];
+
+const CAMPS=[
+{id:"camp_dasctf-http8",state:"awaiting_verify",mode:"goal_seeking",target:"http://dasctf-http8.example/",profile:"kali",kind:"web",created:"09-07 14:02",updated:"09-10 08:31",cancel_epoch:0,epoch:41,thinking:"max",solver:"deepseek-v4-flash",
+ budget:{calls:{spent:1391,total:3000,reserved:2},tokens:{spent:18420000,total:30000000,reserved:51200},cost:{spent:null,note:"price_version=unknown，花费按负债记"},deadline:null},
+ fin:{execute_runs_total:14,finish_primary_total:11,finalizer_started_total:3,finalizer_committed_total:2,finalizer_failed_total:1,incomplete_protocol_total:1,finish_conflict_total:1,finish_validation_error_total:1},
+ pending:{id:"fact_9f2c1a",fact_key:"flag_recovered",proposition:"DASCTF{ph4r_uns3r1al1ze_m3_pl3ase}",fact:"fact_9f2c1a"},
+ lock:"proc-8f31a2（租约至 09:47，20s 心跳）",active_run:{id:"run_8842",mode:"execute",state:"running",step:"st_http8_unserial",attempt:2,fence:8842,started:"08:14",deadline:"09:14"},
+ ops:[{execution_id:"kali_inv_5521",bin:"nmap",args:"-sV -p- 10-target",state:"running",started:"08:20",next_poll:"09:00",lock:"workspace 排它锁"},{execution_id:"kali_inv_5497",bin:"katana",args:"-u http://…/ -d 3",state:"completed",started:"07:58",collected:"stdout → art_3381"}],
+ uncertain:[{id:"inv_6120",purpose:"kali_run curl",effect:"unknown",execution_id:"kali_inv_6120",err:"流式超时 600s"}],
+ residual:[{execution_id:"kali_inv_6120",invocation:"inv_6120",killable:true}],
+ observations:[
+  {id:"obs_201",subject:"http:GET /",at:"09-07 14:20",by:"st_http8_probe",sum:"首页 200，标题 'ephemeral notes'，含 /login 与 /api/note"},
+  {id:"obs_214",subject:"http:GET /filter.php?source",at:"09-07 15:02",by:"st_http8_filter",sum:"PHP 源码：class LogReader{...} unserialize($_GET['log'])"},
+  {id:"obs_312",subject:"http:POST /api/log",at:"09-08 11:40",by:"st_http8_unserial",sum:"payload 触发 file read，返回 /etc/passwd 片段"},
+  {id:"obs_388",subject:"http:flag read",at:"09-10 08:22",by:"st_http8_unserial",sum:"读取 /flag：DASCTF{ph4r_uns3r1al1ze_m3_pl3ase}"}],
+ facts:[
+  {id:"fact_5510",proposition:"站点对 log 参数做 unserialize，POP 链终点为 file_get_contents",key:"http8_pop_chain",st:"accepted",grade:"derived",validity:"current",refs:["obs_214","obs_312"]},
+  {id:"fact_5511",proposition:"白名单过滤 ( ' / 三个字符，可用 phar:// 绕过",key:"http8_filter",st:"accepted",grade:"observed",validity:"current",refs:["obs_214"]},
+  {id:"fact_5512",proposition:"DASCTF{wr0ng_gu3ss_1}",key:"flag_recovered",st:"disputed",grade:"observed",validity:"stale",note:"被 reject 驳回：flag 不正确，容器 php 是预言机误导",refs:["obs_301"]},
+  {id:"fact_9f2c1a",proposition:"DASCTF{ph4r_uns3r1al1ze_m3_pl3ase}",key:"flag_recovered",st:"pending",grade:"observed",validity:"current",refs:["obs_388"]}],
+ findings:[
+  {id:"fg_101",claim:"unserialize POP 链可读任意文件",st:"confirmed",dedup:"http8-pop-read",impact:"拿到 flag",refs:["obs_312","obs_388"]},
+  {id:"fg_102",claim:"/upload 目录可猜测文件名",st:"suspected",dedup:"http8-upload-guess",impact:"备用入口",refs:["obs_214"]}],
+ coverage:[
+  {obligation:"http-probe",dim:"method",app:"applicable",exec:"tested",outcome:"no_issue_observed",evi:"current",mandatory:true},
+  {obligation:"headless-browser",dim:"method",app:"applicable",exec:"in_progress",outcome:"none",evi:"missing",mandatory:false},
+  {obligation:"host:dasctf-http8.example",dim:"asset",app:"applicable",exec:"tested",outcome:"confirmed",evi:"current",mandatory:true}],
+ steps:[
+  {id:"st_http8_probe",q:"GET 首页并记录 HTML",kind:"explore",mf:"http-probe",st:"resolved",att:1,pri:100,why:null},
+  {id:"st_http8_filter",q:"读 filter.php 源码并记录过滤规则",kind:"explore",mf:"http-probe",st:"resolved",att:1,pri:100,why:null},
+  {id:"st_http8_unserial",q:"构造 phar 反序列化 payload 读 /flag",kind:"explore",mf:"http-probe",st:"running",att:2,pri:60,why:"第 1 次被 reject 的 flag 复验",reopen:"fact_key:http8_filter"},
+  {id:"st_http8_verify",q:"复核 flag 原文与提交事实",kind:"verify",mf:"http-probe",st:"ready",att:0,pri:40,why:null},
+  {id:"st_http8_upload",q:"探测 /upload 可猜测文件名",kind:"explore",mf:"http-probe",st:"blocked",att:0,pri:90,why:"前提：workspace 锁被 nmap 占用"}],
+ goals:[{id:"goal_root",stmt:"从 http://dasctf-http8.example/ 恢复 flag",st:"active",root:true,pred:"flag_recovered"},{id:"goal_sub1",stmt:"建立 POP 链可读文件",st:"achieved",root:false,pred:null}],
+ artifacts:[{id:"art_3381",mime:"text/plain",size:48213,note:"katana 爬虫 stdout",trunc:false},{id:"art_3402",mime:"application/json",size:2011,note:"首页响应体",trunc:false},{id:"art_3410",mime:"text/plain",size:128481,note:"nmap 后台输出（仍增长）",trunc:true}],
+ events:[
+  {seq:1182,type:"campaign.state_changed",actor:"controller/engine",at:"09-10 08:31",pay:"awaiting_verify（pending flag_recovered）"},
+  {seq:1181,type:"fact.accepted",actor:"worker/run_8842",at:"08:29",pay:"fact_5511 phar 绕过"},
+  {seq:1180,type:"observation.recorded",actor:"worker/run_8842",at:"08:22",pay:"obs_388 flag 原文"},
+  {seq:1179,type:"run.finish_submitted",actor:"worker/run_8842",at:"08:21",pay:"trigger=primary disposition=resolved"},
+  {seq:1176,type:"run.finalization_started",actor:"controller/engine",at:"07:02",pay:"trigger=natural_stop"},
+  {seq:1170,type:"control.changed",actor:"user/cli",at:"06:44",pay:"hint 不要用容器 php 当预言机"},
+  {seq:1161,type:"fact.invalidated",actor:"user/cli",at:"09-09 23:10",pay:"fact_5512 flag 驳回 → hint 写回"},
+  {seq:1150,type:"decision.committed",actor:"worker/run_8701",at:"09-09 22:58",pay:"propose_step ×2"}],
+ invocations:[
+  {id:"inv_6131",kind:"model",purpose:"execute",state:"completed",at:"09-10 08:29",tok:4210,model:"deepseek-v4-flash",prov:"OpenCode Go"},
+  {id:"inv_6128",kind:"tool",purpose:"kali_run curl",state:"completed",at:"08:27",code:0,trunc:false,artifact:"art_3402"},
+  {id:"inv_6126",kind:"tool",purpose:"kali_write payloads/pop.phar",state:"completed",at:"08:24",code:0},
+  {id:"inv_6120",kind:"tool",purpose:"kali_run curl",state:"uncertain",at:"08:12",code:null,err:"流式超时 600s",execution_id:"kali_inv_6120"},
+  {id:"inv_6117",kind:"model",purpose:"execute",state:"completed",at:"08:05",tok:3888,model:"deepseek-v4-flash",prov:"OpenCode Go"},
+  {id:"inv_6110",kind:"tool",purpose:"kali_run nmap",state:"running",at:"08:20",background:true,execution_id:"kali_inv_5521"},
+  {id:"inv_6104",kind:"model",purpose:"finalize",state:"completed",at:"07:02",tok:912,model:"deepseek-v4-flash",prov:"OpenCode Go",note:"finish_step 补交成功"},
+  {id:"inv_6098",kind:"tool",purpose:"artifact_read art_3381 offset=50000",state:"completed",at:"06:58",code:0,trunc:true},
+  {id:"inv_6090",kind:"tool",purpose:"playwright snapshot",state:"failed_known",at:"06:41",err:"page target closed"},
+  {id:"inv_6088",kind:"tool",purpose:"checkpoint",state:"completed",at:"06:30",code:0}]},
+
+{id:"camp_dasctf-ping15",state:"active",mode:"goal_seeking",target:"http://dasctf-ping15.example/",profile:"kali",kind:"web",created:"09-09 20:10",updated:"09-10 09:02",cancel_epoch:0,epoch:12,thinking:"max",solver:"deepseek-v4-flash",
+ budget:{calls:{spent:402,total:3000,reserved:1},tokens:{spent:5210000,total:30000000,reserved:51200},cost:{spent:null,note:"price_version=unknown"},deadline:null},
+ fin:{execute_runs_total:5,finish_primary_total:5,finalizer_started_total:0,finalizer_committed_total:0,finalizer_failed_total:0,incomplete_protocol_total:0,finish_conflict_total:0,finish_validation_error_total:0},
+ pending:null,lock:null,active_run:{id:"run_9102",mode:"execute",state:"running",step:"st_p15_rce",attempt:1,fence:9102,started:"08:48",deadline:"09:48"},
+ ops:[{execution_id:"kali_inv_7001",bin:"nuclei",args:"-duc -t /opt/nuclei-templates",state:"running",started:"08:52",next_poll:"09:25",lock:"workspace 排它锁"}],
+ uncertain:[],residual:[],
+ observations:[{id:"obs_501",subject:"http:GET /ping",at:"09-09 20:31",by:"st_p15_probe",sum:"ping 接口，参数 host 反射输出"},{id:"obs_502",subject:"http:inject test",at:"09-09 21:12",by:"st_p15_rce",sum:";ls 被过滤，%0a 可注入"}],
+ facts:[{id:"fact_6100",proposition:"ping 接口存在命令注入，换行符可绕过黑名单",key:"p15_injection",st:"accepted",grade:"derived",validity:"current",refs:["obs_502"]}],
+ findings:[{id:"fg_201",claim:"ping 接口命令注入（黑名单过滤）",st:"validating",dedup:"p15-cmdi",impact:"RCE",refs:["obs_502"]}],
+ coverage:[{obligation:"http-probe",dim:"method",app:"applicable",exec:"tested",outcome:"confirmed",evi:"current",mandatory:true}],
+ steps:[{id:"st_p15_probe",q:"探测 ping 接口行为",kind:"explore",mf:"http-probe",st:"resolved",att:1,pri:100,why:null},{id:"st_p15_rce",q:"用换行注入拿命令执行并找 flag",kind:"explore",mf:"http-probe",st:"running",att:1,pri:80,why:null},{id:"st_p15_enum",q:"nuclei 全模板扫描备用面",kind:"explore",mf:"http-probe",st:"ready",att:0,pri:30,why:"等 workspace 锁"}],
+ goals:[{id:"goal_root",stmt:"从 http://dasctf-ping15.example/ 恢复 flag",st:"active",root:true,pred:"flag_recovered"}],
+ artifacts:[],events:[{seq:421,type:"observation.recorded",actor:"worker/run_9102",at:"08:55",pay:"obs_502 %0a 注入成功"},{seq:420,type:"run.claimed",actor:"controller/engine",at:"08:48",pay:"st_p15_rce attempt 1"}],
+ invocations:[{id:"inv_7003",kind:"model",purpose:"execute",state:"completed",at:"08:50",tok:3602,model:"deepseek-v4-flash",prov:"OpenCode Go"},{id:"inv_7001",kind:"tool",purpose:"kali_run nuclei",state:"running",at:"08:52",background:true,execution_id:"kali_inv_7001"},{id:"inv_6998",kind:"tool",purpose:"playwright type #host",state:"completed",at:"08:31",code:0}]},
+
+{id:"camp_rev-sysuser",state:"active",mode:"goal_seeking",target:"--input sysuser.apk",profile:"kali",kind:"reverse",overlay:"apk",created:"09-09 18:44",updated:"09-10 07:55",cancel_epoch:0,epoch:7,thinking:"max",solver:"deepseek-v4-flash",
+ triage:{kind:"reverse",overlay:"apk",confidence:"high",seed:"apk-reverse",skill:"prompts/skills/apk-reverse.txt",evidence:[{src:"container",val:"sysuser.apk: apk 结构（AndroidManifest.xml + classes.dex）",w:3},{src:"magic",val:"sysuser.apk: zip (214 members)",w:2},{src:"user",val:"operator hint: 登录逻辑在 native lib",w:1}]},
+ input:{name:"sysuser.apk",files:214,total:41.2,sha:"9f2c1a…",manifest:true},
+ budget:{calls:{spent:118,total:3000,reserved:0},tokens:{spent:1210000,total:30000000,reserved:0},cost:{spent:null,note:"price_version=unknown"},deadline:null},
+ fin:{execute_runs_total:2,finish_primary_total:2,finalizer_started_total:0,finalizer_committed_total:0,finalizer_failed_total:0,incomplete_protocol_total:0,finish_conflict_total:0,finish_validation_error_total:0},
+ pending:null,lock:null,active_run:null,ops:[],uncertain:[],residual:[],
+ observations:[{id:"obs_801",subject:"apk:manifest",at:"09-09 19:01",by:"st_rev_unpack",sum:"包名 com.sysuser.ctf，MainActivity 走 JNI check()"}],
+ facts:[{id:"fact_8100",proposition:"native check() 在 libsys.so，校验长度 24",key:"rev_check_len",st:"accepted",grade:"derived",validity:"current",refs:["obs_801"]}],
+ findings:[],coverage:[{obligation:"apk-reverse",dim:"method",app:"applicable",exec:"tested",outcome:"no_issue_observed",evi:"current",mandatory:true}],
+ steps:[{id:"st_rev_unpack",q:"解包 apk 并列 dex/native lib",kind:"explore",mf:"apk-reverse",st:"resolved",att:1,pri:100,why:null},{id:"st_rev_lib",q:"逆向 libsys.so 的 check()",kind:"explore",mf:"reverse-native",st:"ready",att:0,pri:90,why:null}],
+ goals:[{id:"goal_root",stmt:"从 sysuser.apk 恢复 flag",st:"active",root:true,pred:"flag_recovered"}],
+ artifacts:[],events:[{seq:88,type:"step.ready",actor:"controller/engine",at:"07:55",pay:"st_rev_lib 就绪"}],
+ invocations:[{id:"inv_8101",kind:"tool",purpose:"kali_run unzip -o",state:"completed",at:"09-09 18:58",code:0}]},
+
+{id:"camp_demo_lab",state:"completed",mode:"goal_seeking",target:"--spec profiles/demo-lab.json",profile:"synthetic",kind:null,created:"09-02 10:00",updated:"09-02 10:26",cancel_epoch:0,epoch:9,thinking:"high",solver:"scripted",
+ budget:{calls:{spent:26,total:1000,reserved:0},tokens:{spent:18400,total:10000000,reserved:0},cost:{spent:0,note:"scripted 不计费"},deadline:null},
+ fin:{execute_runs_total:3,finish_primary_total:3,finalizer_started_total:0,finalizer_committed_total:0,finalizer_failed_total:0,incomplete_protocol_total:0,finish_conflict_total:0,finish_validation_error_total:0},
+ pending:null,lock:null,active_run:null,ops:[],uncertain:[],residual:[],
+ observations:[],facts:[{id:"fact_100",proposition:"sample recovered: SY-4102",key:"sample_recovered",st:"verified",grade:"verified",validity:"current",refs:[]}],findings:[],
+ coverage:[],steps:[{id:"st_lab_desk",q:"检查桌面",kind:"explore",mf:"inspect-desk",st:"resolved",att:1,pri:100,why:null}],goals:[{id:"goal_root",stmt:" Recover the sample ID from the locked lab cabinet",st:"achieved",root:true,pred:"sample_recovered"}],
+ artifacts:[],events:[{seq:34,type:"campaign.state_changed",actor:"controller/engine",at:"10:26",pay:"completed"}],
+ invocations:[{id:"inv_100",kind:"model",purpose:"execute",state:"completed",at:"10:21",tok:512,model:"scripted",prov:"scripted"}]},
+
+{id:"camp_kali_lab",state:"budget_paused",mode:"assessment",target:"--spec profiles/kali-lab.json",profile:"kali",kind:null,created:"09-05 09:00",updated:"09-08 17:20",cancel_epoch:0,epoch:3,thinking:"high",solver:"deepseek-v4-flash",
+ budget:{calls:{spent:1000,total:1000,reserved:0},tokens:{spent:9800000,total:10000000,reserved:0},cost:{spent:0,note:"price_version=unknown"},deadline:null},
+ fin:{execute_runs_total:6,finish_primary_total:4,finalizer_started_total:2,finalizer_committed_total:2,finalizer_failed_total:0,incomplete_protocol_total:0,finish_conflict_total:0,finish_validation_error_total:0},
+ pending:null,lock:null,active_run:null,ops:[],uncertain:[],residual:[],
+ observations:[],facts:[],findings:[{id:"fg_900",claim:"10.0.0.14:22 弱口令",st:"confirmed",dedup:"lab-ssh",impact:"横向",refs:[]}],
+ coverage:[{obligation:"http-probe",dim:"method",app:"applicable",exec:"tested",outcome:"confirmed",evi:"current",mandatory:true},{obligation:"headless-browser",dim:"method",app:"applicable",exec:"untested",outcome:"none",evi:"missing",mandatory:true},{obligation:"asset:10.0.0.0/24",dim:"asset",app:"applicable",exec:"untested",outcome:"none",evi:"missing",mandatory:false}],
+ steps:[],goals:[{id:"goal_root",stmt:"评估 lab.internal 网段",st:"active",root:true,pred:"authorized_lab_assessed"}],
+ artifacts:[],events:[{seq:56,type:"campaign.state_changed",actor:"controller/engine",at:"17:20",pay:"budget_paused calls 1000/1000"}],
+ invocations:[]},
+
+{id:"camp_dasctf-http12",state:"cancelled",mode:"goal_seeking",target:"http://dasctf-http12.example/",profile:"kali",kind:"web",created:"09-06 22:10",updated:"09-06 23:02",cancel_epoch:3,epoch:22,thinking:"max",solver:"deepseek-v4-flash",
+ budget:{calls:{spent:311,total:3000,reserved:0},tokens:{spent:4100000,total:30000000,reserved:0},cost:{spent:null,note:"price_version=unknown"},deadline:null},
+ fin:{execute_runs_total:4,finish_primary_total:2,finalizer_started_total:2,finalizer_committed_total:0,finalizer_failed_total:2,incomplete_protocol_total:2,finish_conflict_total:0,finish_validation_error_total:0},
+ pending:null,lock:null,active_run:null,ops:[],uncertain:[],residual:[],observations:[],facts:[],findings:[],coverage:[],steps:[],goals:[],artifacts:[],events:[{seq:201,type:"campaign.state_changed",actor:"user/cli",at:"23:02",pay:"cancelled cancel_epoch=3，克隆容器已 docker rm"}],
+ invocations:[]}];
+
+/* ---------- 状态 ---------- */
+let sel="camp_dasctf-http8";
+let centerTab="stream";
+let bottomTab="steps";
+let invFilter="all";
+let progOn=true,progTimer=null;
+
+function C(){return CAMPS.find(c=>c.id===sel)}
+const esc=s=>String(s??"").replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
+function short(id){return String(id).replace(/^fact_|^obs_|^fg_|^st_|^inv_|^art_|^goal_/,"")}
+
+/* ---------- toast ---------- */
+function toast(cmd,cap){document.getElementById("toast").style.display="block";document.getElementById("toast-cmd").textContent=cmd;document.getElementById("toast-cap").textContent=cap||"CLI 等价命令 · 后端未接，仅回显"}
+function hideToast(){document.getElementById("toast").style.display="none"}
+function copyToast(){navigator.clipboard&&navigator.clipboard.writeText(document.getElementById("toast-cmd").textContent);const c=document.getElementById("toast-cap");c.textContent="已复制";setTimeout(()=>c.textContent="CLI 等价命令 · 后端未接，仅回显",900)}
+
+/* ---------- modal ---------- */
+function openModal(html){const m=document.getElementById("modal");m.innerHTML='<span class="close" onclick="closeModal()">✕</span>'+html;document.getElementById("modal-mask").classList.add("open")}
+function closeModal(){document.getElementById("modal-mask").classList.remove("open")}
+document.getElementById("modal-mask").addEventListener("click",e=>{if(e.target.id==="modal-mask")closeModal()});
+
+/* ---------- 左栏 ---------- */
+function renderCamps(){
+ document.getElementById("camp-list").innerHTML=CAMPS.map(c=>{
+  const b=c.budget.calls,p=Math.round(b.spent/b.total*100),pt=c.budget.tokens.total?Math.round(c.budget.tokens.spent/c.budget.tokens.total*100):0;
+  return `<div class="camp-item ${c.id===sel?"sel":""}" onclick="selCamp('${c.id}')">
+   <div class="id">${esc(c.id)}${c.pending?'<span class="pending-dot" title="pending flag"></span>':""}</div>
+   <div class="row2"><span class="badge s-${c.state}">${c.state}</span><span>${c.kind?c.kind:(c.mode==="assessment"?"assessment":"synthetic")}</span><span>ep ${c.epoch}</span></div>
+   <div class="barm"><i style="width:${Math.min(p,100)}%"></i><i class="t" style="width:${Math.min(pt,100)}%"></i></div>
+  </div>`}).join("");
+}
+function selCamp(id){sel=id;centerTab="stream";bottomTab="steps";renderAll()}
+
+function renderKali(){
+ document.getElementById("kali-panel").innerHTML=`
+  <div class="kv"><span class="k">镜像</span><span>rionext-kali:rolling</span></div>
+  <div class="kv"><span class="k">master</span><span><span class="lamp ok"></span> 12.9G · 09-02</span></div>
+  <div class="kv"><span class="k">keeper</span><span><span class="lamp warn"></span> rionext-master-keep</span></div>
+  <div class="kv"><span class="k">克隆</span><span>${CAMPS.filter(c=>["active","awaiting_verify"].includes(c.state)).length} 个运行中</span></div>
+  <div class="flex mt">
+   <button class="ghost sm" onclick="toast('rionext kali status')">status</button>
+   <button class="ghost sm" onclick="toast('rionext kali pull')">pull</button>
+   <button class="ghost sm" onclick="toast('rionext kali build')">build</button>
+   <button class="ghost sm" onclick="toast('rionext kali protect')">protect</button>
+   <button class="ghost sm" onclick="toast('rionext kali smoke')">smoke</button>
+  </div>
+  <div class="mini mt">cancel 会 docker rm 克隆，别 docker rmi master。</div>`;
+}
+
+function renderProviders(){
+ document.getElementById("provider-panel").innerHTML=SLOTS.map(s=>`
+  <div class="jack"><span>${s.slot}<span class="mini"> ${s.label}</span></span>
+  <select onchange="toast('rionext provider slots --${s.slot} '+(this.value||'none')+'   # 空槽回落 solver')">
+   <option value="">（回落 solver）</option>
+   ${PROVIDERS.flatMap(p=>p.models.map(m=>`<option value="${m.id}" ${s.model_id===m.id?"selected":""}>${m.name}</option>`)).join("")}
+  </select></div>`).join("")+`
+  <div class="mini mt">4 个 provider · 3 个模型可用 · key 均已设置不回显</div>
+  <div class="flex mt">
+   <button class="ghost sm" onclick="openProvAdd()">添加 provider</button>
+   <button class="ghost sm" onclick="toast('rionext provider test --provider prv_a80bad3e --model deepseek-v4-flash','CLI 等价命令 · 探测 auth/text/tools/vision/reasoning')">test 探测</button>
+   <button class="ghost sm" onclick="showProbe()">最近探测报告</button>
+  </div>`;
+}
+function showProbe(){const p=PROBE_OK;openModal(`<h2>provider 探测报告 · deepseek-v4-flash</h2>
+ <div class="mini">${p.at} · rionext provider test --provider prv_a80bad3e --model deepseek-v4-flash</div>
+ <table class="mt"><tr><th>项</th><th>结果</th><th>说明</th></tr>
+ ${[["auth",p.auth],["text",p.text],["tools",p.tools],["vision",p.vision],["reasoning",p.reasoning],...p.variants.map(v=>["variant:"+v.name,v])].map(([k,v])=>`<tr><td>${k}</td><td>${v.ok?'<span style="color:var(--ok)">ok</span>':'<span style="color:var(--bad)">fail</span>'}</td><td class="mut">${esc(v.detail)}</td></tr>`).join("")}
+ </table>
+ <div class="mini mt">可用性会写回 catalog（available=false 的模型不进 run）。</div>`)}
+function openProvAdd(){openModal(`<h2>添加 Provider</h2>
+ <div class="frow"><label>显示名称</label><input id="pa-name" placeholder="Anthropic 官方"></div>
+ <div class="frow"><label>协议</label><select id="pa-proto"><option>OPENAI_CHAT_COMPLETIONS</option><option>OPENAI_RESPONSES</option><option>ANTHROPIC_MESSAGES</option></select></div>
+ <div class="frow"><label>接口地址</label><input id="pa-url" placeholder="https://api.anthropic.com"></div>
+ <div class="frow"><label>API Key</label><input id="pa-key" type="password" placeholder="sk-…（写入 provider-secrets.json，不回显）"></div>
+ <button onclick="toast('rionext provider add --name \"'+document.getElementById('pa-name').value+'\" --protocol '+document.getElementById('pa-proto').value+' --base-url '+document.getElementById('pa-url').value+' --api-key ******','CLI 等价命令 · key 不回显');closeModal()">保存</button>`)}
+
+/* ---------- 中栏 ---------- */
+function renderToolbar(){
+ const c=C();
+ document.getElementById("camp-toolbar").innerHTML=[
+  ["start","rionext start "+c.id],["pause","rionext pause "+c.id],["resume","rionext resume "+c.id],["cancel","rionext cancel "+c.id],
+  ["hint","hint"],["reconcile","reconcile"],["revise-budget","budget"],["revise-scope","scope"]
+ ].map(([l,cmd])=>`<button class="${l==="cancel"?"warn":"ghost"} sm" onclick="${l==="hint"?"openHint()":l==="reconcile"?"openReconcile()":l==="budget"?"reviseBudget()":l==="scope"?"reviseScope()":`toast(${JSON.stringify(cmd)})`}">${l}</button>`).join("");
+}
+function openHint(){const c=C();openModal(`<h2>注入 hint</h2><div class="mini">写进战役上下文，下一次 Decide 能看到；驳回 flag 时也会自动带一条。</div>
+ <textarea id="h-text" rows="3" placeholder="不要用容器 php 当 unserialize 预言机"></textarea>
+ <button class="mt" onclick="toast('rionext hint ${c.id} --text \"'+document.getElementById('h-text').value+'\"');closeModal()">记录 hint（epoch +1）</button>`)}
+function openReconcile(){const c=C();const u=c.uncertain;
+ openModal(`<h2>reconcile 不确定调用</h2>
+ ${u.length?u.map(x=>`<div class="card"><div class="kv"><span class="k">invocation</span><span>${x.id} · ${esc(x.purpose)}</span></div>
+   <div class="kv"><span class="k">execution_id</span><span>${x.execution_id}</span></div>
+   <div class="kv"><span class="k">现象</span><span style="color:var(--bad)">${esc(x.err)}</span></div>
+   <button class="ghost sm mt" onclick="toast('rionext reconcile ${c.id} --invocation ${x.id}')">rionext reconcile 该条</button></div>`).join(""):`<div class="mini">当前没有 uncertain invocation。</div>`}
+ <div class="mini mt">也可不带 --invocation 全量核对：rionext reconcile ${c.id}</div>`)}
+function reviseBudget(){const c=C();openModal(`<h2>改预算</h2>
+ <div class="frow"><label>max_calls</label><input id="rb-c" type="number" value="${c.budget.calls.total}"></div>
+ <div class="frow"><label>max_tokens</label><input id="rb-t" type="number" value="${c.budget.tokens.total}"></div>
+ <div class="frow"><label>max_cost_micro</label><input id="rb-m" type="number" placeholder="留空不改"></div>
+ <button onclick="toast('rionext revise-budget ${c.id} --max-calls '+document.getElementById('rb-c').value+' --max-tokens '+document.getElementById('rb-t').value);closeModal()">提交（epoch +1）</button>`)}
+function reviseScope(){const c=C();openModal(`<h2>改 scope 版本</h2><div class="mini">scope_version 变更会让等待 env_revision 的 step 重新就绪。</div>
+ <div class="frow"><label>scope_version</label><input id="rs-v" value="${esc(c.id==="camp_dasctf-http8"?"s-quick-2":"s-quick-1")}"></div>
+ <button onclick="toast('rionext revise-scope ${c.id} --scope-version '+document.getElementById('rs-v').value);closeModal()">提交</button>`)}
+
+function renderHead(){
+ const c=C();
+ document.getElementById("camp-head").innerHTML=`
+  <div class="flex" style="justify-content:space-between">
+   <div class="flex">
+    <h2 style="margin:0;font-size:15px">${esc(c.id)}</h2>
+    <span class="badge s-${c.state}">${c.state}</span>
+    <span class="badge">${c.mode}</span>
+    ${c.kind?`<span class="badge">题型 ${c.kind}${c.overlay?"/"+c.overlay:""}</span>`:""}
+    <span class="mini">${esc(c.target)} · thinking ${c.thinking} · solver ${c.solver}</span>
+   </div>
+   <div class="mini">epoch ${c.epoch} · cancel_epoch ${c.cancel_epoch} · 更新 ${c.updated}</div>
+  </div>`;
+ document.getElementById("center-tabs").innerHTML=["stream 实时流","steps 队列","ops 容器操作","verify 人审"]
+  .map(t=>{const[k,l]=t.split(" ");return `<div class="tab ${centerTab===k?"on":""}" onclick="centerTab='${k}';renderCenter()">${l}</div>`}).join("");
+ document.getElementById("tabbar").innerHTML=["steps","facts","findings","observations","coverage","events","artifacts","report"]
+  .map(t=>`<div class="tab ${bottomTab===t?"on":""}" onclick="bottomTab='${t}';renderCenter()">${t}</div>`).join("");
+}
+
+function renderCenter(){
+ const c=C();
+ renderHead();
+ const tb=document.getElementById("center-body");
+ if(centerTab==="stream"){
+  tb.innerHTML=`<div class="pad flex" style="padding-bottom:4px">
+    ${["all","model","tool","异常"].map(f=>`<span class="sub ${invFilter===f?"on":""}" onclick="invFilter='${f}';renderCenter()">${f}</span>`).join("")}
+    <span class="mini" style="margin-left:auto">活动 run：${c.active_run?`${c.active_run.mode} ${c.active_run.state} ${c.active_run.id} · fence ${c.active_run.fence} · 租约 ${c.active_run.started}→${c.active_run.deadline}`:"idle"}</span></div>
+   ${(c.invocations||[]).filter(i=>invFilter==="all"||(invFilter==="异常"?["uncertain","failed_known"].includes(i.state):i.kind===invFilter)).map(i=>`
+    <div class="inv"><div class="top">
+     <span class="t">${i.at.slice(-5)}</span>
+     <span class="kind-${i.kind==="model"?"m":"t"}">${i.kind}</span>
+     <span class="purpose">${esc(i.purpose||"")}</span>
+     <span class="tag">${i.id}</span>
+     ${i.background?'<span class="tag trunc">后台 execution_id='+i.execution_id+"</span>":""}
+     ${i.trunc?'<span class="tag trunc">truncated → artifact_read</span>':""}
+     ${i.err?'<span class="tag err">'+esc(i.err)+"</span>":""}
+     <span class="state st-${i.state}">${i.state}</span></div>
+    <div class="meta">${i.kind==="model"?`${i.tok?i.tok.toLocaleString()+" tok · ":""}${i.model||""}${i.note?" · "+esc(i.note):""}`:`code=${i.code??"-"} ${i.artifact?"· 产物 "+i.artifact:""}`}</div></div>`).join("")||'<div class="pad mini">（无调用）</div>'}`;
+ }else if(centerTab==="steps"){
+  tb.innerHTML=`<div class="pad">${c.steps.map(s=>`
+   <div class="card"><div class="flex" style="justify-content:space-between">
+    <div><b>${esc(s.id)}</b> <span class="badge s-${s.st==="resolved"?"completed":s.st}">${s.st}</span> <span class="badge">${s.kind}</span> <span class="badge">mf:${s.mf}</span></div>
+    <div class="mini">第 ${s.att} 次尝试 · 优先级 ${s.pri}</div></div>
+   <div class="mt">${esc(s.q)}</div>
+   ${s.why?`<div class="mini mt">重开原因：${esc(s.why)} · reopen: ${esc(s.reopen||"-")}</div>`:""}
+   <div class="flex mt"><button class="ghost sm" onclick="toast('rionext explain-step ${c.id} --step ${s.id}','CLI 等价命令 · 输出 attempts/fence/reopen_rule')">explain-step</button></div></div>`).join("")||'<div class="mini">（无 step）</div>'}</div>`;
+ }else if(centerTab==="ops"){
+  tb.innerHTML=`<div class="pad">${(c.ops||[]).map(o=>`
+   <div class="card"><div class="flex" style="justify-content:space-between">
+    <div><b>${o.bin}</b> <span class="mini">${esc(o.args)}</span></div>
+    <span class="badge ${o.state==="running"?"s-awaiting_verify":"s-completed"}">${o.state}</span></div>
+   <div class="mini mt">execution_id ${o.execution_id} · 起于 ${o.started}${o.next_poll?" · 下次轮询 "+o.next_poll:""}${o.lock?" · 占用 "+o.lock:""}${o.collected?" · "+o.collected:""}</div>
+   ${o.state==="running"?`<div class="flex mt"><button class="ghost sm" onclick="toast('rionext status ${c.id} --json','查看 operations 与 next_poll')">查看状态</button><button class="warn sm" onclick="toast('rionext cancel ${c.id}','cancel 停容器并杀后台扫描，已发包不收回')">终止战役容器</button></div>`:""}
+   </div>`).join("")||'<div class="mini">（无后台操作）</div>'}
+  <div class="mini">扫描器（nmap/nuclei/katana…）立即返回 execution_id，在容器里继续跑最长 60 分钟，占用 workspace 排它锁。</div></div>`;
+ }else if(centerTab==="verify"){
+  tb.innerHTML=`<div class="pad">${renderVerifyCard(true)}</div>`;
+ }
+ renderBottom();
+}
+
+function renderVerifyCard(force){
+ const c=C();const p=c.pending;
+ if(!p)return force?'<div class="mini">当前没有待审 flag。</div>':"";
+ return `<div class="card" style="border-color:#5a3c12">
+  <h3>待人审 flag · fact_key=${p.fact_key}</h3>
+  <div style="font-size:15px;color:var(--amber2);word-break:break-all">${esc(p.proposition)}</div>
+  <div class="mini mt">fact ${p.id} · 依据 obs_388 · 战役停在 awaiting_verify，accept 才关战役</div>
+  <div class="flex mt">
+   <button onclick="verifyAccept()">接受 · 关战役</button>
+   <button class="warn" onclick="verifyReject()">驳回 · 带原因继续</button>
+  </div></div>`;
+}
+function verifyAccept(){const c=C();toast("rionext accept "+c.id,"CLI 等价命令 · accept 后 root_goal 置 verified，closing→completed");c.state="completed";c.pending=null;renderAll()}
+function verifyReject(){const c=C();openModal(`<h2>驳回 flag</h2><div class="mini">原因会写进上下文（hint），战役回到 active。勾选 --continue 则立刻再 start。</div>
+ <textarea id="rj-text" rows="3" placeholder="这个 flag 不对，因为……"></textarea>
+ <label class="mini" style="display:block;margin:8px 0"><input type="checkbox" id="rj-cont" checked style="width:auto"> 驳回后立即继续（--continue）</label>
+ <button class="warn" onclick="toast('rionext reject ${c.id} --text \"'+document.getElementById('rj-text').value+'\"'+(document.getElementById('rj-cont').checked?' --continue':''));closeModal()">提交驳回</button>`)}
+
+/* ---------- 底部 tabs ---------- */
+function renderBottom(){
+ const c=C();const el=document.getElementById("tab-body");
+ if(bottomTab==="steps"){
+  el.innerHTML=`<table><tr><th>step</th><th>状态</th><th>kind</th><th>method family</th><th>尝试</th><th>blocked 原因</th><th>reopen</th></tr>
+  ${c.steps.map(s=>`<tr class="click" onclick="toast('rionext explain-step ${c.id} --step ${s.id}')"><td>${esc(s.id)}</td><td><span class="badge s-${s.st==="resolved"?"completed":s.st}">${s.st}</span></td><td>${s.kind}</td><td>${s.mf}</td><td>${s.att}</td><td class="mut">${esc(s.why||"-")}</td><td class="mut">${esc(s.reopen||"-")}</td></tr>`).join("")}</table>`;
+ }else if(bottomTab==="facts"){
+  el.innerHTML=`<table><tr><th>fact</th><th>命题</th><th>fact_key</th><th>认知状态</th><th>grade</th><th>validity</th><th>依据</th></tr>
+  ${c.facts.map(f=>`<tr class="click" onclick="showFact('${f.id}')"><td>${esc(f.id)}</td><td>${esc(f.proposition)}</td><td class="mut">${esc(f.key||"-")}</td>
+  <td>${f.st==="pending"?'<span class="tag trunc">pending 人审</span>':`<span class="tag">${f.st}</span>`}</td><td>${f.grade}</td><td>${f.validity}</td><td class="mut">${(f.refs||[]).join(" ")||"-"}</td></tr>`).join("")}</table>`;
+ }else if(bottomTab==="findings"){
+  el.innerHTML=`<table><tr><th>finding</th><th>claim</th><th>状态</th><th>dedup_key</th><th>impact</th></tr>
+  ${c.findings.map(f=>`<tr><td>${esc(f.id)}</td><td>${esc(f.claim)}</td><td><span class="tag ${f.st==="confirmed"?"":"trunc"}">${f.st}</span></td><td class="mut">${f.dedup}</td><td>${esc(f.impact||"")}</td></tr>`).join("")||'<tr><td colspan="5" class="mut">（无 finding）</td></tr>'}</table>`;
+ }else if(bottomTab==="observations"){
+  el.innerHTML=`<table><tr><th>obs</th><th>subject</th><th>时间</th><th>producing step</th><th>摘要</th></tr>
+  ${c.observations.map(o=>`<tr><td>${esc(o.id)}</td><td>${esc(o.subject)}</td><td class="mut">${o.at}</td><td class="mut">${esc(o.by)}</td><td>${esc(o.sum)}</td></tr>`).join("")||'<tr><td colspan="5" class="mut">（无观察）</td></tr>'}</table>`;
+ }else if(bottomTab==="coverage"){
+  el.innerHTML=`<table><tr><th>obligation</th><th>维度</th><th>applicability</th><th>execution</th><th>outcome</th><th>evidence</th><th>mandatory</th></tr>
+  ${c.coverage.map(cv=>`<tr><td>${esc(cv.obligation)}</td><td>${cv.dim}</td><td>${cv.app}</td><td><span class="tag ${cv.exec==="tested"?"":"trunc"}">${cv.exec}</span></td><td>${cv.outcome}</td><td>${cv.evi}</td><td>${cv.mandatory?"必查":""}</td></tr>`).join("")||'<tr><td colspan="7" class="mut">（goal_seeking 战役通常不铺 coverage）</td></tr>'}</table>`;
+ }else if(bottomTab==="events"){
+  el.innerHTML=`<table><tr><th>seq</th><th>type</th><th>actor</th><th>时间</th><th>payload</th></tr>
+  ${c.events.map(e=>`<tr><td class="mut">${e.seq}</td><td>${esc(e.type)}</td><td class="mut">${esc(e.actor)}</td><td class="mut">${e.at}</td><td>${esc(e.pay)}</td></tr>`).join("")}</table>`;
+ }else if(bottomTab==="artifacts"){
+  el.innerHTML=`<table><tr><th>artifact</th><th>mime</th><th>size</th><th>截断</th><th>说明</th></tr>
+  ${c.artifacts.map(a=>`<tr class="click" onclick="toast('rionext ……（artifact_read 是模型工具；CLI 用 rionext status 看引用）')"><td>${esc(a.id)}</td><td>${a.mime}</td><td>${a.size.toLocaleString()} B</td><td>${a.trunc?'<span class="tag trunc">是</span>':"否"}</td><td class="mut">${esc(a.note)}</td></tr>`).join("")||'<tr><td colspan="5" class="mut">（无产物）</td></tr>'}</table>`;
+ }else if(bottomTab==="report"){
+  const fin=c.fin,pr=fin.execute_runs_total?(fin.finish_primary_total/fin.execute_runs_total*100).toFixed(1)+"%":"n/a",fs=fin.finalizer_started_total?(fin.finalizer_committed_total/fin.finalizer_started_total*100).toFixed(1)+"%":"n/a";
+  const pc=fin.execute_runs_total?((fin.finish_primary_total+fin.finalizer_committed_total)/fin.execute_runs_total*100).toFixed(1)+"%":"n/a";
+  el.innerHTML=`<div class="pad">
+   <div class="mini">rionext report ${c.id} · 快照 seq ${c.events.length?c.events[c.events.length-1].seq:0} · bounded_conclusion：</div>
+   <pre>In scope s-quick-1, env env-1: ${c.state==="completed"?"recovered sample":"未恢复 flag"}. No statement that the world is safe.</pre>
+   <div class="flex">
+    <div class="card" style="flex:1"><h3>收卷统计</h3>
+     <div class="pct-row"><span class="n">${pr}</span><span class="d">主动交卷率 ${fin.finish_primary_total}/${fin.execute_runs_total}</span></div>
+     <div class="pct-row"><span class="n">${fs}</span><span class="d">补交成功率 ${fin.finalizer_committed_total}/${fin.finalizer_started_total}</span></div>
+     <div class="pct-row"><span class="n">${pc}</span><span class="d">最终协议完整率</span></div>
+     <div class="mini mt">validation_error ${fin.finish_validation_error_total} · conflict ${fin.finish_conflict_total} · incomplete_protocol ${fin.incomplete_protocol_total}</div></div>
+    <div class="card" style="flex:1"><h3>报告要点</h3>
+     <div class="kv"><span class="k">findings</span><span>${c.findings.length} 条（${c.findings.filter(f=>f.st==="confirmed").length} confirmed）</span></div>
+     <div class="kv"><span class="k">unresolved</span><span>${c.steps.filter(s=>!["resolved","retired"].includes(s.st)).length} 个 step 未收</span></div>
+     <div class="kv"><span class="k">stop_reason</span><span>${c.state}</span></div>
+     <div class="kv"><span class="k">unknown_cost</span><span>${c.budget.cost.spent==null?"true（price_version=unknown）":"false"}</span></div></div>
+   </div></div>`;
+ }
+}
+function showFact(id){const c=C();const f=c.facts.find(x=>x.id===id);if(!f)return;
+ openModal(`<h2>fact · ${esc(f.id)}</h2>
+ <div class="kv"><span class="k">命题</span><span>${esc(f.proposition)}</span></div>
+ <div class="kv"><span class="k">fact_key</span><span>${esc(f.key||"-")}</span></div>
+ <div class="kv"><span class="k">状态</span><span>${f.st}${f.note?" · "+esc(f.note):""}</span></div>
+ <div class="kv"><span class="k">依据</span><span>${(f.refs||[]).join(" ")||"-"}</span></div>
+ ${f.st==="pending"?`<div class="flex mt"><button onclick="closeModal();verifyAccept()">accept</button><button class="warn" onclick="closeModal();verifyReject()">reject</button></div>`:""}
+ <button class="ghost sm mt" onclick="toast('rionext facts ${c.id} --json')">rionext facts 全量</button>`)}
+
+/* ---------- 右栏 ---------- */
+function renderRight(){
+ const c=C();const b=c.budget;
+ const gauge=(l,o,fmt)=>{const p=o.total?Math.min(100,Math.round(o.spent/o.total*100)):0;
+  return `<div class="gauge"><div class="lbl"><span>${l}</span><span>${fmt}</span></div>
+  <div class="bar"><i class="i-spend" style="width:${p}%"></i>${o.reserved?`<i class="i-res" style="width:${o.total?Math.round(o.reserved/o.total*100):0}%"></i>`:""}</div></div>`};
+ document.getElementById("right-stack").innerHTML=`
+  <div class="card"><h3>预算 ${c.id==="camp_kali_lab"?'<span class="tag err">已触顶 budget_paused</span>':""}</h3>
+   ${gauge("calls",{spent:b.calls.spent,total:b.calls.total,reserved:b.calls.reserved},`${b.calls.spent.toLocaleString()} / ${b.calls.total.toLocaleString()}`)}
+   ${gauge("tokens",{spent:b.tokens.spent,total:b.tokens.total,reserved:b.tokens.reserved},`${(b.tokens.spent/1e6).toFixed(1)}M / ${b.tokens.total/1e6}M`)}
+   <div class="kv"><span class="k">cost</span><span>${b.cost.spent==null?"unknown（"+b.cost.note+"）":b.cost.spent}</span></div>
+   <div class="kv"><span class="k">deadline</span><span>${b.deadline?b.deadline:"无"}</span></div>
+   <div class="mini mt">模型发送和工具调用各记 1 次 call；reserved 是本片段预留。</div></div>
+  <div class="card"><h3>Execute 收卷</h3>
+   <div class="pct-row"><span class="n">${c.fin.execute_runs_total?Math.round(c.fin.finish_primary_total/c.fin.execute_runs_total*100):0}%</span><span class="d">主动交卷 ${c.fin.finish_primary_total}/${c.fin.execute_runs_total}</span></div>
+   <div class="pct-row"><span class="n">${c.fin.finalizer_started_total?Math.round(c.fin.finalizer_committed_total/c.fin.finalizer_started_total*100):0}%</span><span class="d">补交成功 ${c.fin.finalizer_committed_total}/${c.fin.finalizer_started_total}</span></div>
+   <div class="pct-row"><span class="n">${c.fin.execute_runs_total?Math.round((c.fin.finish_primary_total+c.fin.finalizer_committed_total)/c.fin.execute_runs_total*100):0}%</span><span class="d">协议完整率</span></div>
+   <div class="mini mt">finalization 默认开：没交 finish_step 时补一轮，最多一次，thinking low。</div></div>
+  ${renderVerifyCard()}
+  <div class="card"><h3>uncertain / residual</h3>
+   ${(c.uncertain||[]).length?c.uncertain.map(u=>`<div class="kv"><span class="k">${esc(u.id)} ${esc(u.purpose)}</span><span style="color:var(--bad)">${esc(u.err)}</span></div>`).join(""):'<div class="mini">无 uncertain 调用。</div>'}
+   ${(c.residual||[]).length?c.residual.map(r=>`<div class="flex mt"><span class="mini">${r.execution_id} · 可终止</span><button class="warn sm" onclick="toast('rionext cancel ${c.id}','cancel 停容器，已发的包收不回来')">cancel 容器</button></div>`).join(""):""}
+   <button class="ghost sm mt" onclick="openReconcile()">reconcile 核对</button></div>
+  <div class="card"><h3>控制器与租约</h3>
+   <div class="kv"><span class="k">锁</span><span>${c.lock?esc(c.lock):"空闲（无进程持有）"}</span></div>
+   <div class="kv"><span class="k">active run</span><span>${c.active_run?c.active_run.mode+" "+c.active_run.id:"-"}</span></div>
+   <div class="kv"><span class="k">ready / blocked</span><span>${c.steps.filter(s=>s.st==="ready").length} / ${c.steps.filter(s=>s.st==="blocked").length}</span></div>
+   <div class="mini mt">同一战役不要再 start 第二个进程，锁会拒绝。</div></div>`;
+}
+
+/* ---------- run 向导 ---------- */
+function openWizard(){
+ openModal(`<h2>新战役 · 三种入口</h2>
+ <div class="tabs-sub">
+  <span class="sub on" id="wz-t-url" onclick="wzTab('url')">--url 活靶 web</span>
+  <span class="sub" id="wz-t-input" onclick="wzTab('input')">--input 附件（triage）</span>
+  <span class="sub" id="wz-t-spec" onclick="wzTab('spec')">--spec 文件</span>
+ </div>
+ <div id="wz-body"></div>`);
+ wzTab("url");
+}
+function wzTab(t){
+ ["url","input","spec"].forEach(k=>document.getElementById("wz-t-"+k).classList.toggle("on",k===t));
+ const b=document.getElementById("wz-body");
+ if(t==="url"){
+  b.innerHTML=`<div class="frow"><label>目标 URL</label><input id="wz-url" value="http://authorized-target.example/"></div>
+  <div class="frow"><label>战役 id</label><input id="wz-id" placeholder="留空按 host 生成 camp_&lt;host&gt;"></div>
+  <div class="frow"><label>thinking</label><select id="wz-th"><option>max</option><option>high</option><option>low</option></select></div>
+  <div class="mini">solver 槽模型跑。成功条件固定 flag_recovered；scope 自动带 host 与入口 URL；出口按解析 IP 放行。</div>
+  <div class="flex mt"><button onclick="wzUrl()">生成 spec（create 并 start）</button></div><div id="wz-prev"></div>`;
+ }else if(t==="input"){
+  b.innerHTML=`<div class="frow"><label>附件路径</label><select id="wz-file" onchange="wzTriage()">
+   <option value="apk">D:\\ctf\\sysuser.apk（214 文件 / 41.2MB）</option>
+   <option value="elf">D:\\ctf\\crackme.elf（1 文件 / 24KB）</option>
+   <option value="pcap">D:\\ctf\\chall.pcapng（1 文件 / 3.1MB）</option>
+   <option value="png">D:\\ctf\\stego.png（1 文件 / 2.2MB）</option></select></div>
+  <div class="frow"><label>--kind</label><select id="wz-kind" onchange="wzTriage()"><option>auto（自动判定）</option><option>reverse</option><option>pwn</option><option>misc</option><option>crypto</option><option>generic</option></select></div>
+  <div class="frow"><label>--endpoint</label><input id="wz-ep" placeholder="tcp://10.20.30.40:9999（可空）"></div>
+  <div class="frow"><label>--hint</label><input id="wz-h" placeholder="登录逻辑在 native lib（可空）"></div>
+  <div id="wz-prev"></div>`;
+  wzTriage();
+ }else{
+  b.innerHTML=`<div class="frow"><label>spec 路径</label><select id="wz-spec"><option>profiles/demo-lab.json（scripted 合成）</option><option>profiles/kali-lab.json（assessment）</option></select></div>
+  <div class="mini">已有同 id 则接着跑；--url 与 --spec 不能同用。</div>
+  <div class="flex mt"><button onclick="toast('rionext run --spec '+document.getElementById('wz-spec').value.split('（')[0]+' --progress-ms 60000')">run --spec</button></div>
+  <div id="wz-prev"></div>`;
+ }
+}
+function wzUrl(){
+ const u=document.getElementById("wz-url").value,id=document.getElementById("wz-id").value,th=document.getElementById("wz-th").value;
+ const host=u.replace(/^https?:\/\//i,"").split("/")[0];
+ document.getElementById("wz-prev").innerHTML=`<pre>campaign_id  ${id||("camp_"+host.replace(/[^a-z0-9.]+/gi,"-"))}
+mode        goal_seeking
+root_goal   恢复 flag（success_predicate flag_recovered）
+scope       assets=[${host}] entries=[${u}] profile=kali-lab
+tool_allowlist  graph_query artifact_read submit_* propose_step finish_* checkpoint kali_run kali_write playwright
+model_policy    ${PROVIDERS[1].display_name}/deepseek-v4-flash thinking=${th}
+budget      3000 calls · 30,000,000 tokens（默认）
+execution_profile  kali</pre>`;
+ toast(`rionext run --url ${u}${id?" --id "+id:""}`);
+}
+const TRIAGE={
+ apk:{kind:"reverse",overlay:"apk",conf:"high",seed:"apk-reverse",evi:[["container","sysuser.apk: apk 结构（AndroidManifest.xml + classes.dex）",3],["magic","sysuser.apk: zip (214 members)",2],["user","operator hint",1]]},
+ elf:{kind:"reverse",overlay:null,conf:"high",seed:"reverse-native",evi:[["magic","crackme.elf: elf 64-bit x86-64 dynamic",3]]},
+ pcap:{kind:"misc",overlay:"protocol",conf:"high",seed:"protocol-pcap",evi:[["magic","chall.pcapng: pcapng",3]]},
+ png:{kind:"misc",overlay:"stego",conf:"high",seed:"ctf-misc",evi:[["magic","stego.png: png",3]]}};
+const WZ_PATHS={apk:"D:\\ctf\\sysuser.apk",elf:"D:\\ctf\\crackme.elf",pcap:"D:\\ctf\\chall.pcapng",png:"D:\\ctf\\stego.png"};
+function wzTriage(){
+ const f=document.getElementById("wz-file").value,k=document.getElementById("wz-kind").value,tr=TRIAGE[f];
+ const over=k!=="auto（自动判定）"&&k!==tr.kind;
+ const kind=over?k:tr.kind,conf=over?"high（用户覆盖）":tr.conf,seed=over?{reverse:"reverse-native",pwn:"pwn-chain",misc:"ctf-misc",crypto:"ctf-crypto",generic:"ctf-triage"}[k]:tr.seed;
+ document.getElementById("wz-prev").innerHTML=`<div class="card mt"><h3>triage 预览（本地确定性，不跑附件）</h3>
+  <div class="flex"><span class="badge">题型 ${kind}${tr.overlay&&kind===tr.kind?"/"+tr.overlay:""}</span><span class="badge">置信度 ${conf}</span><span class="badge">seed ${seed}</span><span class="badge">skill prompts/skills/${seed}.txt</span></div>
+  <div class="mini mt">证据：</div>${tr.evi.map(e=>`<div class="evi">${e[0]} · ${esc(e[1])}（权重 ${e[2]}）</div>`).join("")}
+  <div class="mini mt">workspace 布局：input/original 只读 · input/manifest.json（sha256、format、executable）· work/ 草稿 · artifacts/ 证据</div></div>
+  <button onclick="toast('rionext run --input ${WZ_PATHS[f]}${k!=="auto（自动判定）"?" --kind "+k:""}${document.getElementById("wz-ep").value?" --endpoint "+document.getElementById("wz-ep").value:""}${document.getElementById("wz-h").value?' --hint "'+document.getElementById("wz-h").value+'"':""}')">run --input</button>`;
+}
+
+/* ---------- 进度条 ---------- */
+function tickProg(){
+ const c=C();const now=new Date();const clock=now.toTimeString().slice(0,8);
+ const b=c.budget,run=c.active_run;
+ document.getElementById("prog").textContent=`${clock}  ${c.id}  ${c.state}  calls ${b.calls.spent}/${b.calls.total}  tokens ${b.tokens.spent}/${b.tokens.total}  ${run?run.mode+" "+run.state:"idle"}`;
+}
+function toggleProg(){progOn=!progOn;document.getElementById("prog").classList.toggle("on",progOn);if(progOn){tickProg();progTimer=setInterval(tickProg,5000)}else clearInterval(progTimer)}
+if(progOn)progTimer=setInterval(tickProg,5000);
+
+/* ---------- render all ---------- */
+function renderAll(){renderCamps();renderKali();renderProviders();renderHead();renderCenter();renderRight();tickProg()}
+renderAll();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 import { DomainError } from "../domain/errors.ts";
 import type { EffectAdapter } from "./effect-adapter.ts";
-import { KALI_BINARIES, shouldBackgroundKali } from "./kali-profile.ts";
+import { isKnownKaliBin, shouldBackgroundKali } from "./kali-profile.ts";
 import type { KaliStartOpts, KaliRuntime } from "./kali-runtime.ts";
 
 export interface KaliPayload {
@@ -24,7 +24,7 @@ export function isKaliPayload(payload: unknown): payload is KaliPayload {
   const p = payload as { kind?: unknown; bin?: unknown; url?: unknown; op?: unknown };
   if (p.kind === "kali" || p.kind === "browser" || p.kind === "playwright" || p.kind === "kali_write") return true;
   if (p.op === "write") return true;
-  return typeof p.bin === "string" && KALI_BINARIES.has(p.bin);
+  return typeof p.bin === "string" && isKnownKaliBin(p.bin);
 }
 
 export class KaliEffectAdapter implements EffectAdapter {

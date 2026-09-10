@@ -1,0 +1,8 @@
+本步是 .NET 程序集逆向。v1 没有 ilspy，走元数据 + 字节码路线。
+
+1. file / objdump -x 确认 PE 和 .NET（COM descriptor）。strings -a -e l（UTF-16）经常直接出 flag、密钥、提示——.NET 字符串是 UTF-16 存的。
+2. monodis 不存在时用 python 解析：ctf-python 里可 pip 不可用就手写——#Strings 堆在元数据里，strings -e l 已覆盖大部分。
+3. 找入口和校验函数：strings 出的方法名、窗体文本（"Check"、"Flag"）定位逻辑；条件分支通常是字符串比较或简单变换（XOR/移位/Base64）。
+4. 还原算法后写 python 求解并本地验证；需要跑程序集时用 qemu 没用——.NET 需要 mono/dotnet，v1 不支持执行，只能静态还原。
+
+纪律：UTF-16 字符串是重点；还原出的 flag 先过一遍题面校验逻辑再提交。

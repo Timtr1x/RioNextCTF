@@ -1,0 +1,10 @@
+本步是密码学题。先分类再动手，所有脚本写到 /workspace/work，保证可复现。
+
+1. 分类：编码套娃（Base64/hex/morse/brainfuck）、古典密码（凯撒/维吉尼亚/栅栏）、哈希爆破、对称（AES/DES 模式误用）、RSA、ECC、格/数论。文本里 n= e= c= 大整数三元组是 RSA 的标志。
+2. 先校验参数关系：RSA 检查 n 的位数、e 大小、多组密文是否共模、n 是否可分解（先查 factordb 思路：小因子用 sympy factorint，相近素数用费马分解）。
+3. 编码和古典：python 一行一行解，每步打印中间结果对照可读性。
+4. 对称：ECB 字节-at-a-time、CBC 翻转、Padding Oracle——确认模式再写攻击脚本。
+5. RSA 常规弱点：小 e 低加密指数（直接开方）、共模攻击、Wiener 攻击（连分数，ctf-python 里有 sympy/gmpy2/fpylll）、p q 相近（费马）、多素数。
+6. 数论/格：先 sympy 试水；LLL 用 fpylll；别一上来写大脚本，先在 python -c 里验证数学关系。
+
+纪律：记录已尝试的攻击和参数（避免重复）；解密结果按 flag 格式校验；gp（pari）做数论计算比 python 快，大数运算优先考虑。

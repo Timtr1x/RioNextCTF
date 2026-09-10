@@ -1,6 +1,9 @@
 *
+!Dockerfile
 !entrypoint.sh
 !install-extra.sh
+!install-ctf.sh
+!verify-ctf-tools.sh
 !pw/package.json
 !pw/pw-daemon.mjs
 !pw/pw-ctl.mjs

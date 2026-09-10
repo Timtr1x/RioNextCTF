@@ -79,13 +79,24 @@ Start a live Kali flag campaign (solver slot, no spec file):
   rionext run --url http://authorized-target.example/
   rionext http://authorized-target.example/
 
+Or a local CTF challenge (file or directory):
+
+  rionext run --input ./crackme.elf
+  rionext run --input ./pwn-dir --endpoint tcp://host:31337
+  rionext run --input ./cipher.txt --kind crypto
+  rionext run --input ./challenge --hint "task description text"
+
+  --input copies attachments into the workspace with a SHA-256 manifest,
+  classifies the challenge (reverse/pwn/misc/crypto/generic) without
+  executing it, and seeds a ready step. --kind overrides classification.
+  --input is mutually exclusive with --url and --spec.
+
 Or a spec file:
 
   rionext run --spec profiles/demo-lab.json
-  rionext run --spec path\\to\\spec.json --progress-ms 60000
+  rionext run --spec path\to\spec.json --progress-ms 60000
 
-run --url uses the solver slot. Same URL again resumes that campaign id.
---url and --spec cannot be used together.
+run --url/--input use the solver slot. Same URL or input path again resumes that campaign id.
 
 Campaign:
 
@@ -107,6 +118,10 @@ Inspect:
 Provider (keys never printed; see rionext ? provider):
 
   rionext provider list|show|add|set|key|rm|model|test|slots|ui
+
+Web UI (full workbench; campaigns run inside the ui process):
+
+  rionext ui [--port 7780]
 
 Kali (see rionext ? kali):
 

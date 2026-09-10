@@ -68,6 +68,16 @@ RUN chmod 0755 /tmp/install-extra.sh \
  && /tmp/install-extra.sh \
  && rm -f /tmp/install-extra.sh
 
+# CTF toolchain (binary/misc/crypto) with its own cache layer. The build fails
+# here when a promised tool is missing; /opt/rionext/tool-index.json records
+# what actually exists.
+COPY install-ctf.sh /tmp/install-ctf.sh
+COPY verify-ctf-tools.sh /tmp/verify-ctf-tools.sh
+RUN chmod 0755 /tmp/install-ctf.sh /tmp/verify-ctf-tools.sh \
+ && /tmp/install-ctf.sh \
+ && /tmp/verify-ctf-tools.sh \
+ && rm -f /tmp/install-ctf.sh /tmp/verify-ctf-tools.sh
+
 COPY entrypoint.sh /usr/local/bin/rionext-entrypoint
 RUN chmod 0755 /usr/local/bin/rionext-entrypoint
 

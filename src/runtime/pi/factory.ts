@@ -19,6 +19,14 @@ import type { BudgetLedger } from "../../gateway/budget-ledger.ts";
 import { ingestToolOutputAsData, type ModelGateway, type ToolGateway } from "../../gateway/gateways.ts";
 import type { StorageService } from "../../storage/service.ts";
 import { isKaliProfile } from "../../tools/kali-profile.ts";
+import {
+  KALI_RUN_DESCRIPTION,
+  KALI_RUN_PARAMETERS,
+  KALI_WRITE_DESCRIPTION,
+  KALI_WRITE_PARAMETERS,
+  PLAYWRIGHT_DESCRIPTION,
+  PLAYWRIGHT_PARAMETERS,
+} from "../../tools/kali-schemas.ts";
 import type { KaliRuntime } from "../../tools/kali-runtime.ts";
 import { actWorld, inspectWorld, type LabWorld } from "../../tools/synthetic.ts";
 import type { StreamFn as PiStreamFn } from "@earendil-works/pi-agent-core";
@@ -725,34 +733,13 @@ export class PiWorker implements WorkerRuntime {
           s.saveWorld(lease.campaign_id, result.world);
           return ok({ observation: result.observation, subject: result.subject, transient: result.transient ?? false });
         }),
-        tool("kali_run", "Run an allowlisted Kali binary in the campaign container. nmap/nuclei/katana and other scanners return immediately with execution_id and keep running in the container (up to 60 min). Do not poll; finish_step. bash/sh/python3 run /workspace scripts or bash -c.", Type.Object({
-          kind: Type.Literal("kali"),
-          bin: Type.String(),
-          args: Type.Array(Type.String()),
-          url: Type.Optional(Type.String()),
-          redirects: Type.Optional(Type.Array(Type.String())),
-          timeout_ms: Type.Optional(Type.Number()),
-        }), async (_id, _params) => {
+        tool("kali_run", KALI_RUN_DESCRIPTION, KALI_RUN_PARAMETERS, async (_id, _params) => {
           return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_kali_result"));
         }),
-        tool("kali_write", "Write a script or payload file into the campaign container workspace (/workspace)", Type.Object({
-          kind: Type.Literal("kali_write"),
-          path: Type.String({ description: "Relative path under /workspace, e.g. payloads/xss.html" }),
-          content: Type.String(),
-        }), async (_id, _params) => {
+        tool("kali_write", KALI_WRITE_DESCRIPTION, KALI_WRITE_PARAMETERS, async (_id, _params) => {
           return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_kali_write_result"));
         }),
-        tool("playwright", "Operate the persistent Playwright Chromium in the Kali container (goto/snapshot/click/type/press/screenshot/content/wait/back/status). Use snapshot refs for click/type.", Type.Object({
-          kind: Type.Literal("playwright"),
-          op: Type.String({ description: "goto|snapshot|click|type|press|screenshot|content|wait|back|status" }),
-          url: Type.Optional(Type.String()),
-          ref: Type.Optional(Type.String()),
-          selector: Type.Optional(Type.String()),
-          text: Type.Optional(Type.String()),
-          key: Type.Optional(Type.String()),
-          timeout_ms: Type.Optional(Type.Number()),
-          redirects: Type.Optional(Type.Array(Type.String())),
-        }), async (_id, _params) => {
+        tool("playwright", PLAYWRIGHT_DESCRIPTION, PLAYWRIGHT_PARAMETERS, async (_id, _params) => {
           return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_playwright_result"));
         }),
         this.finishStepTool(lease, "primary"),

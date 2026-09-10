@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import type { ContextPack } from "../contracts/worker-runtime.ts";
+import { SKILL_BY_METHOD_FAMILY } from "../domain/challenge-kind.ts";
 import { hashJson } from "../domain/fingerprint.ts";
 import type { ContextManifest, ReadSetEntry, RunLease } from "../domain/types.ts";
 import type { StorageService } from "../storage/service.ts";
-import { isKaliProfile } from "../tools/kali-profile.ts";
+import { allowedBinsFor, isKaliProfile } from "../tools/kali-profile.ts";
 import { PROMPT_VERSION } from "../version.ts";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -29,6 +30,44 @@ export function loadPrompt(mode: "decide" | "execute" | "finalize"): string {
     return "当前 Execute 片段已经停止，必须立即提交片段结果。你只能调用 finish_step，不能继续探索。";
   }
   return "Solve the current step with approved tools, submit observations, then finish_step.";
+}
+
+/** Skill text is optional and file-backed; a missing file never fails a run. */
+export function loadSkill(file: string): string | null {
+  for (const base of [join(here, "../../../prompts/skills"), join(process.cwd(), "prompts/skills")]) {
+    try {
+      const text = readFileSync(join(base, file), "utf8").trim();
+      if (text) return text;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+/**
+ * Execute-only, kali-only, input-campaigns-only. The step's method_family picks
+ * one skill file; the kind's binary allowlist is listed in the header so the
+ * model can see what exists without guessing. Web campaigns carry no
+ * spec.challenge and always get skill_pack: null.
+ */
+function buildSkillPack(
+  camp: { spec: { execution_profile: string; challenge?: { kind: string; seed_method_family: string } } },
+  step: unknown,
+): string | null {
+  const challenge = camp.spec.challenge;
+  if (!challenge || challenge.kind === "web") return null;
+  if (!isKaliProfile(camp.spec.execution_profile)) return null;
+  const family =
+    step && typeof step === "object" && typeof (step as { method_family?: unknown }).method_family === "string"
+      ? ((step as { method_family: string }).method_family as string)
+      : "";
+  const file = SKILL_BY_METHOD_FAMILY[family] ?? SKILL_BY_METHOD_FAMILY[challenge.seed_method_family];
+  if (!file) return null;
+  const text = loadSkill(file);
+  if (!text) return null;
+  const bins = [...allowedBinsFor(challenge.kind)].sort().join(" ");
+  return [`# ${family}（${challenge.kind}）`, `本战役可直接运行的二进制：${bins}`, "", text].join("\n");
 }
 
 export function buildContextPack(storage: StorageService, lease: RunLease, extra: Record<string, unknown> = {}): ContextPack {
@@ -65,6 +104,9 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   if (lease.step_id) {
     const step = storage.store.db.prepare("SELECT * FROM steps WHERE id = ?").get(lease.step_id);
     payload.current_step = step;
+    if (lease.mode === "execute") {
+      payload.skill_pack = buildSkillPack(camp, step);
+    }
   }
   const encoded = JSON.stringify(payload);
   if (encoded.length > 400_000) {

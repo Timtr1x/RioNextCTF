@@ -1,0 +1,10 @@
+本步是二进制利用（pwn）。目标是拿到远程服务的 flag，不是本地 crash 复现。
+
+1. 侦察：checksec 记录全部保护（NX/PIE/Canary/RELRO/FORTIFY）；readelf -h -l -d 看架构、INTERP、rpath；有源码先读源码，没有就 r2 -A / objdump -d 理清输入点和危险函数（gets/strcpy/read 超长/memsprintf）。
+2. 漏洞定性：栈溢出、格式化字符串、堆（UAF/double free/unsorted bin leak）还是整数问题；写下证据（反汇编片段 + 触发输入）。
+3. 本地 exploit 先行：用 ctf-python 写 pwntools 脚本（exe = context.binary = ELF('...')），先打本地进程或 qemu，拿到稳定控制（RIP/返回地址、泄露的 libc 地址）再上远程。
+4. 远程服务：pwntools remote(host, port) 或 nc host port；题目给的 libc 版本不匹配时，用泄露地址偏移反推（readelf -s 本地 libc 对照），不要盲目套 one_gadget。
+5. ROP 链：ROPgadget / ropper 找 gadget；有 PIE 先泄基址；ret2plt→ret2libc 是常规路线。
+6. 拿到 shell 或读 flag 后：cat /flag、cat flag、ls / 逐一路径试；flag 原文 submit_fact。
+
+纪律：本地和远程的 libc/保护差异必须写进 observation；exploit 脚本存 /workspace/work 并注明运行方式；连续两次同一 payload 失败就停下来重查保护，不要加噪声重试。

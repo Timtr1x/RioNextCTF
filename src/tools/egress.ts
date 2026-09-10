@@ -33,13 +33,15 @@ export function parseDestination(raw: string): Destination {
   } catch {
     throw deny("dest_parse", `cannot parse destination ${raw}`);
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
+  if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "tcp:") {
     throw deny("dest_protocol", `protocol ${url.protocol} is not allowed`);
   }
   const host = url.hostname.toLowerCase();
   if (!host) throw deny("dest_host", "destination host is empty");
-  const port = url.port ? Number(url.port) : url.protocol === "http:" ? 80 : 443;
-  return { protocol: url.protocol.replace(":", ""), host, port, raw: text };
+  const proto = url.protocol.replace(":", "");
+  const port = url.port ? Number(url.port) : proto === "http" ? 80 : proto === "https" ? 443 : 0;
+  if (!port) throw deny("dest_port", "tcp destination requires an explicit port");
+  return { protocol: proto, host, port, raw: text };
 }
 
 export function parseAllowList(assets: string[]): AllowEntry[] {

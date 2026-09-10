@@ -1,0 +1,11 @@
+本步处理未定型的挑战附件。先做一轮确定性侦察，把题型收敛，再按对应流程走。
+
+1. 全量过一遍 input/original：file 每个文件；text 文件通读；sha256sum 对照 manifest。
+2. 压缩包/归档：7z l 列内容再决定解什么；别递归解压嵌套压缩包超过两层，先记录结构。
+3. 出现可执行文件（ELF/PE）：转逆向流程——checksec、strings、readelf；有远程端点按 pwn 处理。
+4. 出现图片/音频/文档：转 misc 流程——元数据、binwalk、隐写工具。
+5. 出现 PCAP：转流量流程——协议统计、会话、对象导出。
+6. 出现密文/大整数参数：转密码流程——先分类编码/RSA/对称。
+7. 侦察完仍无法定型：把已排除的类型和理由写成 observation，用 propose_step 建议一个具体方向的后续 step（method_family 用 reverse-native / ctf-misc / ctf-crypto / pwn-chain 之一），然后 finish_step。
+
+纪律：侦察步不许执行未知二进制；不许爆破式尝试；结论必须有命令输出支撑。

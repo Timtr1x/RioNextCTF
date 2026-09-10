@@ -92,6 +92,20 @@ OpenCode Go（`opencode.ai`）请求会自动带 `x-opencode-session`（战役�
 
 改完 TypeScript 必须重新 `npx tsc -p tsconfig.json` 再 `start`。正在跑的进程用的还是旧 `dist`。
 
+## 工作台 UI（ui 服务器）
+
+`.\rionext.cmd ui --port 7780` 拉起的不是只读面板：UI 里 start 的战役作为该进程内的异步 Engine 任务在跑，和 CLI 用同一套 `controller_locks`。因此：
+
+- **同一战役勿双 start。** ui 进程内在跑的战役，CLI 再 `start` 会被锁拒（`controller_lock_held`，报错里带 owner）；反过来也一样。ui 自己重复 start 返回 409 `already_running`。
+- **ui 进程重启 = 控制器崩溃恢复。** 重启后首个 `start`/`resume` 走 `recoverStaleRuns`：过期租约被接管，跑到一半的 Execute 片段标 `uncertain`，先 `reconcile` 再续跑。UI 详情页时间线上 uncertain 的 bar 点了就能 reconcile。
+- **关 ui 不会清战场。** 进程退出不 cancel 战役；战役容器还在，锁租约（60 分钟）到期前别的进程接不走，要么回 ui 里 pause/cancel，要么等租约过期。
+- **上传暂存在数据目录。** 向导传的附件放 `.rionext/uploads/<id>/`，triage 只做确定性判定（magic bytes / ELF / ZIP 清单），不执行样本。删除战役不会清 uploads，自己删目录即可。
+- **Kali 长操作是子进程任务。** 基础设施页的 pull/build/protect/smoke 在 ui 里 spawn 子 CLI 跑（不阻塞事件循环），日志在任务卡片里轮询；同一时刻同类操作防重入。
+- **health 有 3 秒缓存。** 顶栏 chip 每 5 秒打一次 `/api/health`，docker inspect 最坏会卡几秒，缓存是为了不拖慢整页。
+- **备份恢复走 API 也行。** 设置页 backup 默认落到 `.rionext/backups/backup-<时间戳>`；restore 会覆盖当前数据目录，按钮带二次确认，等价 `rionext restore --from ...`。
+
+`provider ui` 旧命令不受影响，仍是那个只管 catalog 的本地页。
+
 ## 人审 flag
 
 `goal_seeking` 且 `success_predicate_ref` 不是合成 `sample_recovered` 时，模型交 `flag_recovered` 会停在 `awaiting_verify`，不会自己标完成。

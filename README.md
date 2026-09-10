@@ -63,6 +63,17 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 .\rionext.cmd run --spec profiles/demo-lab.json
 ```
 
+本地 CTF 附件（Reverse/Pwn/Misc/Crypto）一条命令开打：
+
+```
+.\rionext.cmd run --input .\crackme.elf
+.\rionext.cmd run --input .\pwn-dir --endpoint tcp://host:31337
+.\rionext.cmd run --input .\cipher.txt --kind crypto
+.\rionext.cmd run --input .\challenge --hint "题面描述"
+```
+
+`--input` 把文件/目录复制进战役工作区（`.rionext/workspace/<id>/input/original`，附 SHA-256 清单），在宿主机做确定性分诊（magic bytes / ELF / PE / ZIP 目录，不执行样本），按题型选二进制白名单，并给 Execute 注入对应的短 skill（`prompts/skills/`）。`--kind auto|reverse|pwn|misc|crypto|generic` 显式覆盖分诊；`--endpoint` 只接受 `tcp://host:port`。`--input` 与 `--url`/`--spec` 互斥。Web 战役的 prompt、工具 schema、白名单逐字节不变（`tests/contract/web-golden.test.ts` 锁定）。CTF 工具链在镜像的独立层，改了要重建：`npm run kali:build`。同一路径再跑会 resume 同一战役；想换 `--kind` 重判就换 `--id` 或删掉旧战役。
+
 `--url` 和 `--spec` 不能一起用。命中 `flag_recovered` 会停在 `awaiting_verify`：
 
 ```
@@ -91,5 +102,18 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 默认：一段 Execute 72 轮模型、144 次工具；预算 3000 calls、30_000_000 tokens。Execute Finalize 默认开，Primary 没交 `finish_step` 时补交一次。
 
 同一战役不要再开一个 `start`。正在跑的进程用的还是旧 `dist`。
+
+## 工作台 UI
+
+```
+npm run build          # tsc + vite，产出 dist/ 与 web/dist/
+.\rionext.cmd ui       # http://127.0.0.1:7780（--port 改端口）
+```
+
+单进程 = HTTP API + 静态前端 + 战役后台执行：UI 里 `创建并 start` 的战役跑在 ui 进程内（和 CLI 同款 Engine、同一把控制器锁），CLI 那边照样 `list`/`status`/`events` 看得到。绑 127.0.0.1、无认证，只在本地用。
+
+页面：总览 / 战役 / 审查中心（待审 flag 徽标数）/ 模型目录（provider、探测、槽位配线）/ 基础设施（Kali 镜像操作走后台任务日志）/ 设置；战役详情含图谱、时间线、看板、观察、覆盖、事件、报告 7 个页签。顶栏 `＋ 新战役` 是三步向导：`--url` 活靶、`--input` 本地附件（上传后实时 triage 预览题型）、`--spec` JSON。`⌘K` 命令面板里的每条命令都是真执行，toast 回显等效 CLI。
+
+前端轮询（2s）`events?after=seq` 增量，不推流。开发前端用 `npm run web:dev`（vite，proxy `/api`→7780），先另开一个 `ui` 进程当后端。
 
 Pinned Pi packages: [docs/dependency-integrity.md](docs/dependency-integrity.md).

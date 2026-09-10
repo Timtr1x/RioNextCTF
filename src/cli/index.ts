@@ -6,7 +6,7 @@ import { Engine, restoreEngineData } from "../controller/engine.ts";
 import { DomainError } from "../domain/errors.ts";
 import { runReactBaseline } from "../eval/baseline-react.ts";
 import { HELP, flagString, parseArgs, resolveCampaignId } from "./args.ts";
-import { loadCampaignSpec } from "./run-spec.ts";
+import { loadCampaignSpec, seedChallengeStep } from "./run-spec.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "./format.ts";
 import { KALI_HELP, handleKaliCommand } from "./kali.ts";
 import { PROVIDER_HELP, handleProviderCommand } from "./providers.ts";
@@ -49,8 +49,7 @@ async function runCampaign(engine: Engine, id: string, flags: Record<string, str
   }
 }
 
-function printHelp(topic?: string): void {
-  if (topic === "provider" || topic === "providers") {
+function printHelp(topic?: string): void {  if (topic === "provider" || topic === "providers") {
     console.log(PROVIDER_HELP);
     return;
   }
@@ -134,6 +133,23 @@ async function main(): Promise<void> {
     emit(restoreEngineData(resolve(from), dir), true);
     return;
   }
+  if (cmd === "ui" || cmd === "web" || cmd === "serve") {
+    const port = flags.port ? Number(flags.port) : 7780;
+    const { startUiServer } = await import("../web/server.ts");
+    const ui = await startUiServer({
+      dataDir: dir,
+      port,
+      maxCycles: flags["max-cycles"] ? Number(flags["max-cycles"]) : 1000,
+    });
+    console.log(`rionext ui ${ui.url}  data ${dir}`);
+    console.log("campaigns started here run inside this process; Ctrl+C stops the server, not the data");
+    const shutdown = (): void => {
+      void ui.close().then(() => process.exit(0));
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+    return;
+  }
   if (cmd === "provider" || cmd === "providers") {
     if (flags.help || positional[0] === "help") {
       console.log(PROVIDER_HELP);
@@ -177,7 +193,8 @@ async function main(): Promise<void> {
       return;
     }
     if (cmd === "run") {
-      const spec = loadCampaignSpec(flags, positional, dir) as { campaign_id?: string };
+      const loaded = loadCampaignSpec(flags, positional, dir);
+      const spec = loaded.spec as { campaign_id?: string };
       let created = false;
       try {
         engine.createCampaign(spec);
@@ -187,14 +204,16 @@ async function main(): Promise<void> {
       }
       const id = typeof spec.campaign_id === "string" ? spec.campaign_id : "";
       if (!id) throw new Error("spec.campaign_id is required");
+      if (created && loaded.seed) seedChallengeStep(engine.storage, id, loaded.seed);
       await runCampaign(engine, id, flags, json);
       const st = engine.status(id);
       emit({ created, id, ...st }, json, formatStatus(st));
       return;
     }
     if (cmd === "create") {
-      const spec = loadCampaignSpec(flags, positional, dir);
-      const rec = engine.createCampaign(spec);
+      const loaded = loadCampaignSpec(flags, positional, dir);
+      const rec = engine.createCampaign(loaded.spec);
+      if (loaded.seed) seedChallengeStep(engine.storage, rec.id, loaded.seed);
       emit({ created: rec.id, state: rec.state, started: false }, json, `created ${rec.id}  ${rec.state}`);
       return;
     }

@@ -11,11 +11,14 @@
     "rionext": "./dist/src/cli/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && vite build web",
+    "build:ts": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.json && node --test \"./dist/tests/**/*.test.js\"",
     "rionext": "node dist/src/cli/index.js",
     "cli": "node dist/src/cli/index.js",
     "start": "node dist/src/cli/index.js",
+    "web:dev": "vite web",
+    "web:build": "vite build web",
     "kali:pull": "docker pull kalilinux/kali-rolling",
     "kali:build": "docker build -t rionext-kali:rolling -t rionext-kali:master docker/kali"
   },
@@ -26,6 +29,12 @@
   },
   "devDependencies": {
     "@types/node": "24.3.0",
-    "typescript": "5.9.3"
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "5.9.3",
+    "vite": "^6.3.5"
   }
 }

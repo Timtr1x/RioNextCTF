@@ -1,0 +1,9 @@
+本步是 APK 逆向。v1 镜像没有 apktool/jadx，走手工路线。
+
+1. unzip -l 看结构；把 APK 复制到 /workspace/work 再解（input/original 只读）：unzip -d work/apk app.apk。
+2. AndroidManifest.xml 是二进制 XML：用 strings 提取包名、activity、权限、硬编码 URL/key。
+3. classes.dex：strings -a classes.dex 找 flag 格式、密钥、算法名（AES/Base64/Native）；方法名混淆时按字符串引用反查。
+4. resources.arsc / assets/ / res/raw/ 常藏密文或二级载荷；lib/<abi>/*.so 是 native 逻辑，转 reverse-native 流程（readelf/strings/objdump）。
+5. 简单校验逻辑（strcmp、Base64、固定 XOR）直接写 python 还原；别试图装 apktool。
+
+纪律：记录每个文件来源路径；找到的密文先本地解密验证再提交。

@@ -1,4 +1,5 @@
 import { SCHEMA_VERSION } from "../version.ts";
+import { isChallengeKind, type ChallengeInfo, type TriageEvidence } from "./challenge-kind.ts";
 import { invalidInput } from "./errors.ts";
 import type { CampaignSpec, CampaignState } from "./types.ts";
 
@@ -137,7 +138,56 @@ export function validateCampaignSpec(input: unknown): CampaignSpec {
     },
     environment_revision: requireString(raw, "environment_revision"),
   };
+  const challenge = parseChallengeInfo(raw.challenge);
+  if (challenge) spec.challenge = challenge;
   return spec;
+}
+
+/** Optional --input metadata. Only kind and seed_method_family are load-bearing. */
+function parseChallengeInfo(raw: unknown): ChallengeInfo | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw invalidInput("invalid_challenge", "challenge must be an object");
+  }
+  const obj = raw as Record<string, unknown>;
+  const kindRaw = requireString(obj, "kind");
+  if (!isChallengeKind(kindRaw) || kindRaw === "auto") {
+    throw invalidInput("invalid_challenge", `challenge.kind must be one of web|reverse|pwn|misc|crypto|generic, got ${kindRaw}`);
+  }
+  const kind = kindRaw as ChallengeInfo["kind"];
+  const out: ChallengeInfo = {
+    kind,
+    seed_method_family: optionalString(obj, "seed_method_family") ?? "ctf-triage",
+  };
+  const detected = optionalString(obj, "detected_kind");
+  if (detected && isChallengeKind(detected) && detected !== "auto") out.detected_kind = detected;
+  const overlay = optionalString(obj, "overlay");
+  if (overlay) out.overlay = overlay as ChallengeInfo["overlay"];
+  const confidence = optionalString(obj, "confidence");
+  if (confidence === "high" || confidence === "medium" || confidence === "low") out.confidence = confidence;
+  if (Array.isArray(obj.evidence)) {
+    const sources = new Set(["user", "magic", "container", "header", "text"]);
+    out.evidence = obj.evidence
+      .filter(
+        (e): e is TriageEvidence =>
+          Boolean(e && typeof e === "object") &&
+          typeof (e as TriageEvidence).value === "string" &&
+          sources.has(String((e as TriageEvidence).source)),
+      )
+      .map((e) => ({ source: e.source, value: e.value, weight: Number(e.weight ?? 0) }));
+  }
+  if (obj.input && typeof obj.input === "object") {
+    const inp = obj.input as Record<string, unknown>;
+    out.input = {
+      source_name: optionalString(inp, "source_name") ?? "input",
+      files: optionalIntOrNull(inp, "files") ?? 0,
+      total_bytes: optionalIntOrNull(inp, "total_bytes") ?? 0,
+      sha256: optionalString(inp, "sha256") ?? "",
+    };
+  }
+  const endpoint = optionalString(obj, "endpoint");
+  if (endpoint) out.endpoint = endpoint;
+  return out;
 }
 
 export function assertKnownState(state: string): asserts state is CampaignState {

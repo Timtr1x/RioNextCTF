@@ -1,0 +1,10 @@
+本步是原生二进制逆向（ELF/PE/Mach-O/WASM）。按固定顺序推进，每步把关键输出用 submit_observation 记录，附上产生它的命令。
+
+1. 确认文件：file、sha256sum 对照 manifest；readelf -h（PE 用 objdump -x）拿架构、入口、节区。checksec 记录 NX/PIE/Canary/RELRO，即使不做利用也要写进 observation。
+2. 静态粗读：strings -a -n 4 找 flag 格式、密码、可疑路径；readelf -s / objdump -t 看符号（ stripped 就用 r2 的 aaaa）。rabin2 -I -E -S 可以快速汇总。
+3. 反汇编定位主逻辑：r2 -A -c 'afl; s main; pdf' 或 objdump -d -M intel。先找输入校验函数（strcmp、memcmp、scanf/fgets 之后的判断），再沿 xrefs 反推正确输入的约束。
+4. 动态验证：本地直接跑（qemu-x86_64 跑异架构），必要时 gdb -batch -ex 下断看寄存器。样本只能在容器里跑，不要碰宿主机。
+5. 求解约束：输入是确定性校验就把条件翻译成 z3 脚本（ctf-python 里有 z3-solver、angr 可用）；脚本着色前先人工确认分支条件，不要盲跑 angr 全路径。
+6. 改二进制（patch）用 patchelf/r2 -w 写副本到 /workspace/work，original 不动。
+
+纪律：每个结论写清来自哪条命令；猜出的 flag 先本地验证（程序答应 correct / 校验通过）再 submit_fact flag_recovered；卡住时记录已排除路径后 checkpoint + finish_step，不要空转。
