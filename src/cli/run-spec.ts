@@ -104,7 +104,12 @@ export function specFromUrl(url: string, dataDir: string, campaignId?: string): 
  * plan the seed step. Everything happens before campaign creation so a bad
  * input fails before any campaign row exists.
  */
-export function specFromInput(source: Extract<RunSource, { kind: "input" }>, dataDir: string, campaignId?: string): LoadedRun {
+export function specFromInput(
+  source: Extract<RunSource, { kind: "input" }>,
+  dataDir: string,
+  campaignId?: string,
+  opts?: { containerRoot?: string },
+): LoadedRun {
   const abs = resolve(source.path);
   const route = solverRoute(dataDir);
   const id = campaignId?.trim() || campaignIdForInput(basename(abs), abs);
@@ -117,6 +122,7 @@ export function specFromInput(source: Extract<RunSource, { kind: "input" }>, dat
     hint: source.hint,
   });
   const triage = applyKindOverride(detected, source.challengeKind);
+  const root = opts?.containerRoot ?? "/workspace";
   const spec = buildInputFlagSpec({
     provider: route.provider,
     model: route.model,
@@ -130,13 +136,14 @@ export function specFromInput(source: Extract<RunSource, { kind: "input" }>, dat
       sha256: manifest.sha256,
     },
     endpoint: source.endpoint,
+    container_root: opts?.containerRoot,
   });
   const overlayText = triage.overlay ? `/${triage.overlay}` : "";
   const endpointText = source.endpoint ? ` 远程服务 tcp://${source.endpoint.host}:${source.endpoint.port}（容器内可达，pwntools remote() 或 nc）。` : "";
   const question =
-    `挑战附件已就位：/workspace/input/original（${manifest.entries.length} 个文件，SHA-256 清单见 /workspace/input/manifest.json）。` +
+    `挑战附件已就位：${root}/input/original（${manifest.entries.length} 个文件，SHA-256 清单见 ${root}/input/manifest.json）。` +
     `题型判定 ${triage.kind}${overlayText}（置信度 ${triage.confidence}）。` +
-    `按 user_payload.skill_pack 的流程分析附件；input/original 只读，中间产物写 /workspace/work，证据写 /workspace/artifacts。` +
+    `按 user_payload.skill_pack 的流程分析附件；input/original 只读，中间产物写 ${root}/work，证据写 ${root}/artifacts。` +
     endpointText +
     `恢复 flag 后调用 submit_fact，fact_key=flag_recovered，proposition 为 flag 原文。`;
   const seed: SeedStepPlan = {

@@ -103,6 +103,24 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 
 同一战役不要再开一个 `start`。正在跑的进程用的还是旧 `dist`。
 
+## 比赛模式（contest）
+
+接春秋 AI 智能体解题赛平台：一个督导进程轮询题单，最多并行 4 个独立战役，所有战役共享一个 Kali 容器。
+
+```
+.\rionext.cmd contest run --mode test --token-file .\token.txt --slots 4
+.\rionext.cmd contest status
+.\rionext.cmd contest stop
+.\rionext.cmd contest reset <question_id> --token-file .\token.txt
+```
+
+- token 只从 `--token-file` 或 `RIONEXT_CONTEST_TOKEN` 读，不进命令行历史。
+- `--mode test` 收 mock/测试题（演练全链路），`--mode official` 过滤它们。
+- 选题是确定性排序（静态 → 容器 web → 带附件 → pwn/reverse；层内低分优先、解出人多优先），不让模型挑题。
+- 战役自己交 `flag_recovered` 后，督导自动提交平台：判对 → 战役收口、放槽、补下一题；判错 → 平台原文写回战役并自动续跑（同一值不再重交，连错 3 次暂停让槽）；限流/平台故障不算错答。配了 manager 槽的话，判错后多一枪诊断提示。
+- 数据在 `<data-dir>/contest/`（独立 sqlite），共享容器 `rionext-kali-contest`，`contest stop` 全清。
+- 详见 [docs/contest-mode.md](docs/contest-mode.md)（接口契约、容错表、验收清单）。
+
 ## 工作台 UI
 
 ```

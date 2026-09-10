@@ -40,6 +40,9 @@ export interface EngineOptions {
   effectAdapter?: EffectAdapter;
   dockerCli?: DockerCli;
   kaliResolve?: ResolveFn;
+  /** Contest mode: all campaigns of this engine share one Kali container
+   *  (mounts the workspace parent; per-campaign container root /workspace/<id>). */
+  kaliShared?: { name: string; mountHost: string };
   pollWaitMs?: number;
 }
 
@@ -172,7 +175,7 @@ export class Engine {
   kaliOpts(campaignId: string): KaliStartOpts {
     const camp = this.storage.getCampaign(campaignId);
     const allow = camp.spec.scope.assets;
-    return {
+    const opts: KaliStartOpts = {
       campaignId,
       workspaceHost: join(this.config.data_dir, "workspace", campaignId),
       dbPath: this.config.db_path,
@@ -184,6 +187,16 @@ export class Engine {
       resolve: this.options.kaliResolve,
       challengeKind: camp.spec.challenge?.kind ?? "web",
     };
+    if (this.options.kaliShared) {
+      // Contest mode: exec into the shared container; this campaign's
+      // container-side root is /workspace/<campaignId>. Host paths unchanged.
+      opts.shared = {
+        name: this.options.kaliShared.name,
+        mountHost: this.options.kaliShared.mountHost,
+        containerRoot: `/workspace/${campaignId}`,
+      };
+    }
+    return opts;
   }
 
   private kaliOptsForInvocation(invocationId: string): KaliStartOpts {

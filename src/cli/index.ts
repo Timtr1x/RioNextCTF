@@ -9,6 +9,7 @@ import { HELP, flagString, parseArgs, resolveCampaignId } from "./args.ts";
 import { loadCampaignSpec, seedChallengeStep } from "./run-spec.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "./format.ts";
 import { KALI_HELP, handleKaliCommand } from "./kali.ts";
+import { CONTEST_HELP, handleContestCommand } from "./contest.ts";
 import { PROVIDER_HELP, handleProviderCommand } from "./providers.ts";
 
 function dataDir(flags: Record<string, string | boolean>): string {
@@ -55,6 +56,10 @@ function printHelp(topic?: string): void {  if (topic === "provider" || topic ==
   }
   if (topic === "kali") {
     console.log(KALI_HELP);
+    return;
+  }
+  if (topic === "contest") {
+    console.log(CONTEST_HELP);
     return;
   }
   console.log(HELP);
@@ -165,6 +170,24 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;
+    }
+    return;
+  }
+  if (cmd === "contest") {
+    if (flags.help || positional[0] === "help" || positional[0] === "?") {
+      console.log(CONTEST_HELP);
+      return;
+    }
+    try {
+      await handleContestCommand(positional, flags, dir);
+    } catch (err) {
+      if (err instanceof DomainError) {
+        console.error(`${err.code}: ${err.message}`);
+        process.exitCode = 2;
+      } else {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exitCode = 1;
+      }
     }
     return;
   }

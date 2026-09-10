@@ -94,6 +94,9 @@ export function buildInputFlagSpec(args: {
   input: { source_name: string; files: number; total_bytes: number; sha256: string };
   endpoint?: TcpEndpoint;
   thinking_level?: CampaignSpec["model_policy"]["thinking_level"];
+  /** Container-side workspace root in the prompt text. Defaults to /workspace;
+   *  the contest shared container passes /workspace/<campaignId>. */
+  container_root?: string;
 }): CampaignSpec {
   if (!args.provider.startsWith("prv_")) {
     throw invalidInput("unknown_model", `unknown provider ${args.provider}`);
@@ -101,13 +104,14 @@ export function buildInputFlagSpec(args: {
   if (!args.model.trim()) throw invalidInput("unknown_model", "model is required");
   const { triage } = args;
   const label = KIND_LABEL[triage.kind] ?? "general CTF";
+  const root = args.container_root ?? "/workspace";
   const endpointText = args.endpoint
     ? ` The remote service is reachable from inside the campaign container at tcp://${args.endpoint.host}:${args.endpoint.port} (use pwntools remote() or nc).`
     : "";
   const statement =
-    `Authorized ${label} challenge. Challenge files are staged at /workspace/input/original ` +
-    `(SHA-256 manifest at /workspace/input/manifest.json). Treat input/original as read-only; ` +
-    `write scripts and scratch output to /workspace/work and final evidence to /workspace/artifacts.${endpointText} ` +
+    `Authorized ${label} challenge. Challenge files are staged at ${root}/input/original ` +
+    `(SHA-256 manifest at ${root}/input/manifest.json). Treat input/original as read-only; ` +
+    `write scripts and scratch output to ${root}/work and final evidence to ${root}/artifacts.${endpointText} ` +
     `Recover the flag. When you have the flag, submit a fact with fact_key flag_recovered and the flag string in the proposition.`;
   const challenge: ChallengeInfo = {
     kind: triage.kind,

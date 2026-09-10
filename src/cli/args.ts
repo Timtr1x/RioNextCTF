@@ -123,6 +123,12 @@ Web UI (full workbench; campaigns run inside the ui process):
 
   rionext ui [--port 7780]
 
+Contest (multi-slot auto competition runner; see rionext ? contest):
+
+  rionext contest run --mode test|official --token-file ./token.txt [--slots 4]
+  rionext contest status|stop
+  rionext contest reset <question_id> --token-file ./token.txt
+
 Kali (see rionext ? kali):
 
   rionext health

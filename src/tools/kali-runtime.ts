@@ -17,6 +17,19 @@ import {
   workspaceRelPath,
 } from "./kali-profile.ts";
 
+/**
+ * Shared-container mode (contest supervisor): several campaigns exec into ONE
+ * container. The container mounts `mountHost` (the workspace parent dir) at
+ * /workspace; each campaign's container-side root is `containerRoot`
+ * (/workspace/<campaignId>). Host-side paths (workspaceHost, opFiles, artifact
+ * staging) stay per-campaign and are unchanged.
+ */
+export interface KaliSharedSpec {
+  name: string;
+  mountHost: string;
+  containerRoot: string;
+}
+
 export interface KaliStartOpts {
   campaignId: string;
   workspaceHost: string;
@@ -30,6 +43,9 @@ export interface KaliStartOpts {
   resolve?: ResolveFn;
   /** Challenge kind drives the binary allowlist; absent means legacy web. */
   challengeKind?: string;
+  shared?: KaliSharedSpec;
+  /** Container resource overrides; defaults come from DEFAULT_KALI_LIMITS. */
+  limits?: { memory?: string; cpus?: string };
 }
 
 export interface ContainerSpec {
@@ -78,11 +94,13 @@ function forbiddenMount(host: string, forbidden: string[]): boolean {
 }
 
 export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
-  const name = containerName(opts.campaignId);
-  mkdirSync(opts.workspaceHost, { recursive: true });
-  const workspace = dockerVolumePath(opts.workspaceHost);
+  const name = opts.shared?.name ?? containerName(opts.campaignId);
+  const mountHost = opts.shared?.mountHost ?? opts.workspaceHost;
+  const containerRoot = opts.shared?.containerRoot ?? "/workspace";
+  mkdirSync(mountHost, { recursive: true });
+  const workspace = dockerVolumePath(mountHost);
   const forbidden = [opts.dbPath, opts.secretsPath, opts.artifactRoot, opts.dataDir].filter(Boolean);
-  if (forbiddenMount(opts.workspaceHost, forbidden.filter((p) => p !== opts.workspaceHost))) {
+  if (forbiddenMount(mountHost, forbidden.filter((p) => p !== mountHost))) {
     throw new DomainError("kali_mount", "workspace collides with controller paths", "denied");
   }
   const env: Record<string, string> = {
@@ -92,7 +110,7 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
     PLAYWRIGHT_BROWSERS_PATH: "/opt/pw-browsers",
     DISABLE_UPDATE_CHECK: "true",
   };
-  const mounts = [{ host: opts.workspaceHost, container: "/workspace", mode: "rw" as const }];
+  const mounts = [{ host: mountHost, container: "/workspace", mode: "rw" as const }];
   const argv: string[] = [
     "run",
     "-d",
@@ -101,11 +119,11 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
     "--hostname",
     "kali",
     "--workdir",
-    "/workspace",
+    containerRoot,
     "--memory",
-    DEFAULT_KALI_LIMITS.memory,
+    opts.limits?.memory ?? DEFAULT_KALI_LIMITS.memory,
     "--cpus",
-    DEFAULT_KALI_LIMITS.cpus,
+    opts.limits?.cpus ?? DEFAULT_KALI_LIMITS.cpus,
     "--pids-limit",
     String(DEFAULT_KALI_LIMITS.pids),
     "--cap-drop",
@@ -152,7 +170,7 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
   return { name, argv, mounts, env, network, image: opts.image ?? KALI_IMAGE };
 }
 
-function collectAllowIps(assets: string[], resolve: ResolveFn): string[] {
+export function collectAllowIps(assets: string[], resolve: ResolveFn): string[] {
   const allow = parseAllowList(assets);
   const ips = new Set<string>();
   for (const e of allow) {
@@ -383,7 +401,7 @@ export class KaliRuntime {
       return this.execBackground(opts, spec.name, bin, args, executionId, extra?.timeout_ms);
     }
     const capSec = Math.ceil((extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) / 1000);
-    const argv = ["exec", "-w", "/workspace", spec.name, "timeout", String(capSec), bin, ...args];
+    const argv = ["exec", "-w", containerRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
     const result = this.docker.run(argv, {
       timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
@@ -391,7 +409,9 @@ export class KaliRuntime {
     const truncated =
       result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
-    if (result.timedOut) this.kill(opts.campaignId);
+    // Never kill a shared container on timeout: the `timeout` wrapper already
+    // reaped the process, and killing the box would nuke sibling campaigns.
+    if (result.timedOut && !opts.shared) this.kill(opts.campaignId);
     const out = { ...result, truncated, container: spec.name };
     this.last.set(opts.campaignId, out);
     return out;
@@ -401,7 +421,7 @@ export class KaliRuntime {
     opts: KaliStartOpts,
     executionId: string,
   ): DockerExecResult & { truncated: boolean; container: string; pending?: boolean } {
-    const files = opFiles(opts.workspaceHost, executionId);
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
     const stdout = existsSync(files.out) ? readFileSync(files.out, "utf8") : "";
     const stderr = existsSync(files.err) ? readFileSync(files.err, "utf8") : "";
     const codeRaw = existsSync(files.exit) ? Number(readFileSync(files.exit, "utf8").trim()) : 1;
@@ -414,7 +434,7 @@ export class KaliRuntime {
       code,
       timedOut: code === 124,
       truncated,
-      container: containerName(opts.campaignId),
+      container: opts.shared?.name ?? containerName(opts.campaignId),
       pending: false,
     };
     this.last.set(opts.campaignId, out);
@@ -422,12 +442,12 @@ export class KaliRuntime {
   }
 
   backgroundStatus(opts: KaliStartOpts, executionId: string): "unknown" | "completed" | "failed" {
-    const files = opFiles(opts.workspaceHost, executionId);
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
     if (existsSync(files.exit)) {
       const code = Number(readFileSync(files.exit, "utf8").trim());
       return code === 0 ? "completed" : "failed";
     }
-    const box = this.inspectCampaign(opts.campaignId);
+    const box = this.inspectName(opts.shared?.name ?? containerName(opts.campaignId));
     if (box === "missing" || box === "exited") return "failed";
     return "unknown";
   }
@@ -440,7 +460,7 @@ export class KaliRuntime {
     executionId: string,
     timeoutMs?: number,
   ): DockerExecResult & { truncated: boolean; container: string; pending: boolean } {
-    const files = opFiles(opts.workspaceHost, executionId);
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
     mkdirSync(dirname(files.sh), { recursive: true });
     const capSec = Math.ceil((timeoutMs ?? DEFAULT_KALI_LIMITS.maxBackgroundRuntimeMs) / 1000);
     const quoted = [bin, ...args].map(shQuote).join(" ");
@@ -452,7 +472,7 @@ export class KaliRuntime {
       "",
     ].join("\n");
     writeFileSync(files.sh, script, { encoding: "utf8" });
-    const started = this.docker.run(["exec", "-d", "-w", "/workspace", container, "sh", files.containerSh], {
+    const started = this.docker.run(["exec", "-d", "-w", containerRootOf(opts), container, "sh", files.containerSh], {
       timeoutMs: 15_000,
     });
     if (started.code !== 0) {
@@ -529,7 +549,11 @@ export class KaliRuntime {
   }
 
   kill(campaignId: string): void {
-    const name = containerName(campaignId);
+    this.killName(containerName(campaignId));
+  }
+
+  /** Kill + rm a container by literal name (shared contest container included). */
+  killName(name: string): void {
     if (name === KALI_KEEPER_NAME) {
       throw new DomainError("kali_keeper", "refusing to kill the master keeper", "denied");
     }
@@ -537,11 +561,20 @@ export class KaliRuntime {
     this.docker.run(["rm", "-f", name], { timeoutMs: 10_000 });
   }
 
-  inspectCampaign(campaignId: string): "running" | "exited" | "missing" {
-    const name = containerName(campaignId);
+  inspectName(name: string): "running" | "exited" | "missing" {
     const r = this.docker.run(["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 5_000 });
     if (r.code !== 0 || !r.stdout.trim()) return "missing";
     return r.stdout.trim() === "true" ? "running" : "exited";
+  }
+
+  inspectCampaign(campaignId: string): "running" | "exited" | "missing" {
+    return this.inspectName(containerName(campaignId));
+  }
+
+  /** Raw `docker exec <name> sh -c <script>` for supervisor-side container
+   *  maintenance (egress replay). Not model-facing; no argv allowlist here. */
+  execShell(name: string, script: string, timeoutMs = 15_000): DockerExecResult {
+    return this.docker.run(["exec", name, "sh", "-c", script], { timeoutMs, maxBytes: 65_536 });
   }
 
   query(campaignId: string): "unknown" | "completed" | "failed" {
@@ -600,7 +633,11 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-function opFiles(workspaceHost: string, executionId: string): {
+function containerRootOf(opts: KaliStartOpts): string {
+  return opts.shared?.containerRoot ?? "/workspace";
+}
+
+function opFiles(workspaceHost: string, executionId: string, containerRoot = "/workspace"): {
   sh: string;
   out: string;
   err: string;
@@ -617,9 +654,9 @@ function opFiles(workspaceHost: string, executionId: string): {
     out: join(dir, `${id}.out`),
     err: join(dir, `${id}.err`),
     exit: join(dir, `${id}.exit`),
-    containerSh: `/workspace/.rionext-ops/${id}.sh`,
-    containerOut: `/workspace/.rionext-ops/${id}.out`,
-    containerErr: `/workspace/.rionext-ops/${id}.err`,
-    containerExit: `/workspace/.rionext-ops/${id}.exit`,
+    containerSh: `${containerRoot}/.rionext-ops/${id}.sh`,
+    containerOut: `${containerRoot}/.rionext-ops/${id}.out`,
+    containerErr: `${containerRoot}/.rionext-ops/${id}.err`,
+    containerExit: `${containerRoot}/.rionext-ops/${id}.exit`,
   };
 }
