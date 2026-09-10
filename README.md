@@ -105,7 +105,7 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 
 ## 比赛模式（contest）
 
-接春秋 AI 智能体解题赛平台：一个督导进程轮询题单，最多并行 4 个独立战役，所有战役共享一个 Kali 容器。
+接春秋 AI 智能体解题赛平台。开赛那天不用守在电脑前手动建战役。一个督导进程盯着平台题单，自动选题、开战役、交 flag，判错了让战役接着打。命令就四条：
 
 ```
 .\rionext.cmd contest run --mode test --token-file .\token.txt --slots 4
@@ -114,12 +114,48 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 .\rionext.cmd contest reset <question_id> --token-file .\token.txt
 ```
 
-- token 只从 `--token-file` 或 `RIONEXT_CONTEST_TOKEN` 读，不进命令行历史。
-- `--mode test` 收 mock/测试题（演练全链路），`--mode official` 过滤它们。
-- 选题是确定性排序（静态 → 容器 web → 带附件 → pwn/reverse；层内低分优先、解出人多优先），不让模型挑题。
-- 战役自己交 `flag_recovered` 后，督导自动提交平台：判对 → 战役收口、放槽、补下一题；判错 → 平台原文写回战役并自动续跑（同一值不再重交，连错 3 次暂停让槽）；限流/平台故障不算错答。配了 manager 槽的话，判错后多一枪诊断提示。
-- 数据在 `<data-dir>/contest/`（独立 sqlite），共享容器 `rionext-kali-contest`，`contest stop` 全清。
-- 详见 [docs/contest-mode.md](docs/contest-mode.md)（接口契约、容错表、验收清单）。
+token 只从 `--token-file` 或 `RIONEXT_CONTEST_TOKEN` 环境变量读，不进命令行参数，也不写日志。
+
+`--mode test` 照收 mock 题和测试题，用来开赛前把全链路演练一遍。`--mode official` 过滤它们，只打真题。这个参数必须显式给，没有默认值，省得到时候手忙脚乱选错。
+
+### 督导怎么干活
+
+开赛头几秒题单一般是空的，平台有时还会先挂几道 mock 题。督导前 60 秒每 3 秒刷一次题单，之后降到 15 秒一次，刷到题就开打。平台返回出错时按指数退避，最长 30 秒。
+
+选题不问模型，照一张写死的排序表来。第一层是不需要连接、不需要附件的静态 web/misc/crypto，第二层是要起容器的 web，第三层是带附件的 misc/crypto，pwn 和 reverse 这些硬骨头垫后。层内按分值从低到高排，同分比解出人数，人多的先打。理由很朴素。开赛抢的是又快又稳的分，让模型自己挑题，它总会被好玩的题勾走。
+
+每道题映射成一个标准 RioNext 战役，id 是 `camp_q_<题目id>`。标题、分类、分值、连接方式、题目描述写进战役的 `brief.txt`，附件由宿主机提前下载好，下载带浏览器 UA，token 不外发。最多 4 个战役并行，`--slots` 可以在 1 到 8 之间调。
+
+4 个战役共用 1 个 Kali 容器 `rionext-kali-contest`，不是一战役一个。容器给 16g 内存和 8 个 CPU，挂载的是比赛工作区的父目录，每个战役在容器里用自己的 `/workspace/<campaignId>` 子目录。有件事要说清楚。容器启动时丢了全部 capability，iptables 规则写不进去，容器内的出站限制从来没真正生效过，真正的闸门一直在宿主机的 admitNet 上。共享容器没有削弱任何实际存在的隔离。
+
+### flag 怎么交
+
+战役觉得自己拿到 flag，就提交 `flag_recovered` 事实进入待审，督导从这一刻接管。
+
+1. 先用正则从战役的报告里抠 flag 值。抠不出来会把报告打回去，让战役只交 flag 字符串本身。
+2. 同一个值只交一次。被平台判错的值进黑名单，战役再提同一个值会直接被打回。
+3. 提交走全局串行队列，两次之间隔 5 秒。这个平台限速很凶，连发必挨"操作太过频繁"。
+4. 判对时战役收口，槽位立刻空出来补下一题，容器里这道题的目录一并清掉。
+5. 判错就把平台的原文回复写回战役当提示，附上这是第几次错，战役自动续跑。配了 manager 槽的话，判错后多打一枪诊断，告诉战役别再提交哪个值、下一步是继续打还是重置靶机，外加一段提示。同一道题连错 3 次，战役暂停，题目进隔离名单，槽位让给别人。
+6. 限流、WAF 返回的 HTML、"缺少参数"这类平台和配置问题不算错答。等 40 秒重试，不冤枉战役。
+
+如果平台那边显示题已被解出（你手动交了，或者队友从别的路子打了），督导直接取消本地战役，不算失败。
+
+### 容错
+
+平台返回的 JSON 是松动解析的。多出来的字段记一笔日志就放过，缺字段按类型兜底。接口路径和答案参数名都能用环境变量覆盖，平台临时改东西不用动代码。可覆盖的有 `RIONEXT_CONTEST_BASE`、`RIONEXT_CONTEST_LIST_PATH`、`RIONEXT_CONTEST_RESET_PATH`、`RIONEXT_CONTEST_SUBMIT_PATH`、`RIONEXT_CONTEST_ANSWER_PARAM`。
+
+### 赛前检查单
+
+- Kali 镜像得先构建出来，比赛模式不会自己建镜像。
+- 拿真 token 第一次提交时盯着点。实测时把文档写的三个参数全带上，平台还是回"缺少参数"，八成有个没写进文档的参数。真碰到了先用 `RIONEXT_CONTEST_ANSWER_PARAM` 换参数名试，不用改代码。
+- 平台限速恢复大约 40 秒，督导的退避按这个设。也别连续手动 `contest reset`，一样挨限速。
+
+### 数据在哪
+
+数据在 `<data-dir>/contest/`，独立 sqlite，跟主目录的战役互不影响。跑出来的都是标准 RioNext 战役，但工作台默认看不到它们，比赛模式的交互都在 CLI。`contest status` 读状态文件 `contest-state.json`，能看到 pid、轮询次数、每个槽位在干什么、已解出和已隔离的题目清单。`contest stop` 停督导、取消全部战役、杀共享容器。
+
+接口实测记录、实现计划和验收清单在 [docs/contest-mode.md](docs/contest-mode.md)。
 
 ## 工作台 UI
 
