@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { fetchAttachment } from "../domain/attachment-fetch.ts";
 import { applyKindOverride, isChallengeKind, parseTcpEndpoint, type ChallengeKind, type TcpEndpoint } from "../domain/challenge-kind.ts";
 import { classifyChallenge } from "../domain/challenge-triage.ts";
 import { invalidInput } from "../domain/errors.ts";
@@ -21,7 +22,8 @@ export interface SeedStepPlan {
 export type RunSource =
   | { kind: "url"; url: string }
   | { kind: "spec"; path: string }
-  | { kind: "input"; path: string; challengeKind?: ChallengeKind; endpoint?: TcpEndpoint; hint?: string };
+  | { kind: "input"; path: string; challengeKind?: ChallengeKind; endpoint?: TcpEndpoint; hint?: string }
+  | { kind: "input-url"; url: string; challengeKind?: ChallengeKind; endpoint?: TcpEndpoint; hint?: string };
 
 export interface LoadedRun {
   spec: unknown;
@@ -35,6 +37,7 @@ export function pickRunSource(flags: Record<string, string | boolean>, positiona
   const url = fromFlag ?? fromPos;
   const specPath = flagString(flags, "spec");
   const inputPath = flagString(flags, "input");
+  const inputUrl = flagString(flags, "input-url");
   const kindRaw = flagString(flags, "kind");
   const endpointRaw = flagString(flags, "endpoint");
   const hint = flagString(flags, "hint");
@@ -42,14 +45,18 @@ export function pickRunSource(flags: Record<string, string | boolean>, positiona
   if (flags.input === true || inputPath === "true") {
     throw invalidInput("invalid_input", "--input requires a file or directory path");
   }
-  if (inputPath && (url || specPath)) {
-    throw invalidInput("run_source_conflict", "--input cannot be combined with --url or --spec");
+  if (flags["input-url"] === true || inputUrl === "true") {
+    throw invalidInput("invalid_input_url", "--input-url requires an http(s) address");
+  }
+  const inputSources = [inputPath, inputUrl].filter((v) => v !== undefined);
+  if (inputSources.length > 1 || (inputSources.length === 1 && (url || specPath))) {
+    throw invalidInput("run_source_conflict", "--input/--input-url cannot be combined with each other, --url, or --spec");
   }
   if (url && specPath) {
     throw invalidInput("run_source_conflict", "--url and --spec cannot be used together");
   }
 
-  if (inputPath) {
+  if (inputPath || inputUrl) {
     let challengeKind: ChallengeKind | undefined;
     if (kindRaw) {
       if (!isChallengeKind(kindRaw)) {
@@ -62,19 +69,20 @@ export function pickRunSource(flags: Record<string, string | boolean>, positiona
     }
     let endpoint: TcpEndpoint | undefined;
     if (endpointRaw) endpoint = parseTcpEndpoint(endpointRaw);
-    return { kind: "input", path: inputPath, challengeKind, endpoint, hint };
+    if (inputPath) return { kind: "input", path: inputPath, challengeKind, endpoint, hint };
+    return { kind: "input-url", url: inputUrl!, challengeKind, endpoint, hint };
   }
 
-  if (kindRaw) throw invalidInput("kind_without_input", "--kind only applies to --input runs");
-  if (endpointRaw) throw invalidInput("endpoint_without_input", "--endpoint only applies to --input runs");
-  if (hint) throw invalidInput("hint_without_input", "--hint only applies to --input runs");
+  if (kindRaw) throw invalidInput("kind_without_input", "--kind only applies to --input/--input-url runs");
+  if (endpointRaw) throw invalidInput("endpoint_without_input", "--endpoint only applies to --input/--input-url runs");
+  if (hint) throw invalidInput("hint_without_input", "--hint only applies to --input/--input-url runs");
 
   if (url) {
     if (url === "true") throw invalidInput("invalid_url", "--url requires an http(s) address");
     return { kind: "url", url };
   }
   if (!specPath) {
-    throw invalidInput("missing_run_source", "pass a URL, --input <path>, or --spec <file>");
+    throw invalidInput("missing_run_source", "pass a URL, --input <path>, --input-url <url>, or --spec <file>");
   }
   return { kind: "spec", path: specPath };
 }
@@ -154,10 +162,34 @@ export function specFromInput(
   return { spec, seed };
 }
 
-export function loadCampaignSpec(flags: Record<string, string | boolean>, positional: string[], dataDir: string): LoadedRun {
+/**
+ * Download a remote attachment into a stable per-URL directory, so a repeated
+ * --input-url run stages the same path and resumes the same campaign id.
+ */
+async function downloadInputUrl(url: string, dataDir: string): Promise<string> {
+  const key = createHash("sha256").update(url).digest("hex").slice(0, 12);
+  const dir = join(dataDir, "downloads", `dl_${key}`);
+  rmSync(dir, { recursive: true, force: true });
+  const got = await fetchAttachment(url, dir);
+  process.stderr.write(`downloaded ${got.name} (${got.bytes}b, sha256 ${got.sha256.slice(0, 16)}...)\n`);
+  return dir;
+}
+
+export async function loadCampaignSpec(flags: Record<string, string | boolean>, positional: string[], dataDir: string): Promise<LoadedRun> {
   const source = pickRunSource(flags, positional);
   if (source.kind === "spec") {
     return { spec: JSON.parse(readFileSync(resolve(source.path), "utf8")) as unknown };
+  }
+  if (source.kind === "input-url") {
+    const dir = await downloadInputUrl(source.url, dataDir);
+    const staged: Extract<RunSource, { kind: "input" }> = {
+      kind: "input",
+      path: dir,
+      challengeKind: source.challengeKind,
+      endpoint: source.endpoint,
+      hint: source.hint,
+    };
+    return specFromInput(staged, dataDir, flagString(flags, "id"));
   }
   if (source.kind === "input") {
     return specFromInput(source, dataDir, flagString(flags, "id"));

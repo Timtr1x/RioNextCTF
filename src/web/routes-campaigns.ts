@@ -1,5 +1,6 @@
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { fetchAttachment, type FetchedAttachment } from "../domain/attachment-fetch.ts";
 import { applyKindOverride, isChallengeKind, parseTcpEndpoint, type ChallengeKind } from "../domain/challenge-kind.ts";
 import { classifyChallenge } from "../domain/challenge-triage.ts";
 import { invalidInput } from "../domain/errors.ts";
@@ -200,6 +201,59 @@ async function uploadBody(ctx: ApiContext): Promise<unknown> {
   return { upload_id: uploadId, stored: rel, files, total_bytes: total };
 }
 
+/**
+ * Download a remote attachment into an upload batch, so the wizard can take a
+ * challenge link instead of a local file. Lands in the same uploads/<id>/files
+ * layout as a browser upload, so triage and campaign creation run unchanged.
+ */
+async function fetchUploadBody(ctx: ApiContext): Promise<unknown> {
+  const body = await ctx.json<{ url?: string; upload_id?: string; label?: string }>();
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  if (!url) throw invalidInput("missing_url", "url is required");
+  const uploadId =
+    typeof body.upload_id === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(body.upload_id)
+      ? body.upload_id
+      : `up_${Math.random().toString(36).slice(2, 10)}`;
+  const dir = uploadDir(ctx.dataDir, uploadId);
+  const filesDir = join(dir, "files");
+  let got: FetchedAttachment;
+  try {
+    got = await fetchAttachment(url, filesDir, { maxBytes: MAX_INPUT_FILE_BYTES });
+  } catch (err) {
+    throw invalidInput("fetch_failed", err instanceof Error ? err.message : String(err));
+  }
+  let total = 0;
+  const walk = (d: string): void => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else total += statSync(p).size;
+    }
+  };
+  try {
+    walk(filesDir);
+  } catch {
+    // first fetch into this id
+  }
+  if (total > MAX_INPUT_TOTAL_BYTES) {
+    rmSync(got.path, { force: true });
+    throw invalidInput("input_too_large", `upload exceeds total cap of ${MAX_INPUT_TOTAL_BYTES} bytes`);
+  }
+  if (typeof body.label === "string" && body.label.trim() !== "") {
+    writeFileSync(join(dir, "label.txt"), body.label.trim().slice(0, 80), "utf8");
+  }
+  let files = 0;
+  const count = (d: string): void => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) count(p);
+      else files += 1;
+    }
+  };
+  count(filesDir);
+  return { upload_id: uploadId, stored: got.name, files, total_bytes: total, bytes: got.bytes, sha256: got.sha256 };
+}
+
 async function triageBody(ctx: ApiContext): Promise<unknown> {
   const body = await ctx.json<{ upload_id?: string; input_path?: string; label?: string; kind?: string; endpoint?: string; hint?: string }>();
   const source = resolveInputSource(ctx, body);
@@ -376,5 +430,6 @@ export function registerCampaignRoutes(add: Add, engineHost: EngineHost): void {
   });
 
   add("POST", "/api/uploads", uploadBody);
+  add("POST", "/api/uploads/fetch", fetchUploadBody);
   add("POST", "/api/triage", triageBody);
 }

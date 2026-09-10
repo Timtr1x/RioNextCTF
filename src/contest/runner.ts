@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { Engine, openEngine } from "../controller/engine.ts";
 import { invalidInput } from "../domain/errors.ts";
 import { seedChallengeStep, specFromInput, specFromUrl, type LoadedRun } from "../cli/run-spec.ts";
-import { BROWSER_UA, type ContestQuestion, type FetchLike } from "./api.ts";
+import { fetchAttachment } from "../domain/attachment-fetch.ts";
+import type { ContestQuestion, FetchLike } from "./api.ts";
 import { campaignIdFor, planFor, type LaunchPlan } from "./plan.ts";
 
 export interface CampaignHandle {
@@ -67,17 +68,6 @@ function campaignExists(engine: Engine, id: string): boolean {
     return true;
   } catch {
     return false;
-  }
-}
-
-function attachmentName(url: string): string {
-  try {
-    const u = new URL(url);
-    const base = decodeURIComponent(u.pathname.split("/").filter(Boolean).pop() ?? "");
-    const clean = base.replace(/[^A-Za-z0-9._-]+/g, "_").slice(-80);
-    return clean || "attachment.bin";
-  } catch {
-    return "attachment.bin";
   }
 }
 
@@ -281,20 +271,10 @@ export class EngineRunnerFactory implements RunnerFactory {
   /** Host-side download: the platform token never leaves the supervisor, and
    *  the Kali container never talks to the contest CDN. */
   private async download(url: string, dir: string): Promise<void> {
-    const name = attachmentName(url);
-    const dest = join(dir, name);
-    const fetchFn = this.opts.fetchFn ?? fetch;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.opts.downloadTimeoutMs ?? 120_000);
-    try {
-      const res = await fetchFn(url, { signal: ctrl.signal, headers: { "user-agent": BROWSER_UA } });
-      if (!res.ok) throw new Error(`attachment download failed: HTTP ${res.status}`);
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length === 0) throw new Error("attachment download failed: empty body");
-      writeFileSync(dest, buf);
-      this.log(`downloaded attachment ${name} (${buf.length}b)`);
-    } finally {
-      clearTimeout(timer);
-    }
+    const got = await fetchAttachment(url, dir, {
+      fetchFn: this.opts.fetchFn,
+      timeoutMs: this.opts.downloadTimeoutMs ?? 120_000,
+    });
+    this.log(`downloaded attachment ${got.name} (${got.bytes}b)`);
   }
 }

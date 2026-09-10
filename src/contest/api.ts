@@ -13,6 +13,10 @@
  *   recovers in ~40s. All observed business errors are code 101.
  */
 
+import { BROWSER_UA } from "../domain/attachment-fetch.ts";
+
+export { BROWSER_UA };
+
 export interface ContestConnection {
   docker_url?: string;
   docker_ip?: string;
@@ -59,10 +63,6 @@ export class ContestApiError extends Error {
 }
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
-
-/** Chrome UA: the platform sits behind Knownsec WAF, which 403s curl's default UA. */
-export const BROWSER_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 const DEFAULT_BASE = "https://apiterminator.ichunqiu.com";
 const DEFAULT_PATHS = {

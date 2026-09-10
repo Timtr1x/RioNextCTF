@@ -216,7 +216,7 @@ async function main(): Promise<void> {
       return;
     }
     if (cmd === "run") {
-      const loaded = loadCampaignSpec(flags, positional, dir);
+      const loaded = await loadCampaignSpec(flags, positional, dir);
       const spec = loaded.spec as { campaign_id?: string };
       let created = false;
       try {
@@ -234,7 +234,7 @@ async function main(): Promise<void> {
       return;
     }
     if (cmd === "create") {
-      const loaded = loadCampaignSpec(flags, positional, dir);
+      const loaded = await loadCampaignSpec(flags, positional, dir);
       const rec = engine.createCampaign(loaded.spec);
       if (loaded.seed) seedChallengeStep(engine.storage, rec.id, loaded.seed);
       emit({ created: rec.id, state: rec.state, started: false }, json, `created ${rec.id}  ${rec.state}`);

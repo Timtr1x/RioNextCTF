@@ -85,11 +85,15 @@ Or a local CTF challenge (file or directory):
   rionext run --input ./pwn-dir --endpoint tcp://host:31337
   rionext run --input ./cipher.txt --kind crypto
   rionext run --input ./challenge --hint "task description text"
+  rionext run --input-url https://ctf.example/files/task.zip
 
   --input copies attachments into the workspace with a SHA-256 manifest,
   classifies the challenge (reverse/pwn/misc/crypto/generic) without
   executing it, and seeds a ready step. --kind overrides classification.
-  --input is mutually exclusive with --url and --spec.
+  --input-url downloads the attachment host-side first (browser UA, 120s
+  timeout, 256MB cap), then behaves exactly like --input; re-running the same
+  link resumes the same campaign. --input/--input-url are mutually exclusive
+  with each other, --url, and --spec.
 
 Or a spec file:
 

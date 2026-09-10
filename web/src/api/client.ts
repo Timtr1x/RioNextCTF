@@ -107,6 +107,11 @@ export const api = {
       ...(opts.uploadId ? { "x-upload-id": opts.uploadId } : {}),
       ...(opts.label ? { "x-upload-label": opts.label } : {}),
     }),
+  fetchUpload: (body: { url: string; upload_id?: string; label?: string }) =>
+    post<{ upload_id: string; stored: string; files: number; total_bytes: number; bytes: number; sha256: string }>(
+      "/api/uploads/fetch",
+      body,
+    ),
   triage: (body: { upload_id?: string; input_path?: string; label?: string; kind?: string; endpoint?: string; hint?: string }) =>
     post<TriagePreview>("/api/triage", body),
 

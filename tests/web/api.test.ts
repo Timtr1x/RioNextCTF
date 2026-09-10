@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -215,6 +216,44 @@ test("rionext ui api end to end", async (t) => {
 
     const emptyTriage = await api("/api/triage", { body: {} });
     assert.equal(emptyTriage.status, 400);
+  });
+
+  await t.test("uploads/fetch downloads a remote attachment, then triage and create work", async () => {
+    const payload = elf64();
+    const srv = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(payload);
+    });
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    t.after(() => {
+      srv.close();
+    });
+    const port = (srv.address() as { port: number }).port;
+
+    const got = await api("/api/uploads/fetch", {
+      body: { url: `http://127.0.0.1:${port}/files/crackme.elf`, label: "crackme" },
+    });
+    assert.equal(got.status, 200);
+    assert.equal(got.body.stored, "crackme.elf");
+    assert.equal(got.body.bytes, payload.length);
+    const uploadId = String(got.body.upload_id);
+
+    const tri = await api("/api/triage", { body: { upload_id: uploadId, label: "crackme" } });
+    assert.equal(tri.status, 200);
+    assert.equal((tri.body.triage as Record<string, unknown>).kind, "reverse");
+
+    const campId = String(tri.body.campaign_id);
+    const created = await api("/api/campaigns", { body: { upload_id: uploadId, id: campId } });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.created, true);
+
+    const bad = await api("/api/uploads/fetch", { body: { url: "file:///etc/passwd" } });
+    assert.equal(bad.status, 400);
+    assert.equal((bad.body.error as Record<string, unknown>).code, "fetch_failed");
+
+    const missing = await api("/api/uploads/fetch", { body: {} });
+    assert.equal(missing.status, 400);
+    assert.equal((missing.body.error as Record<string, unknown>).code, "missing_url");
   });
 
   await t.test("flag human review: reject writes reason, accept closes the campaign", async () => {

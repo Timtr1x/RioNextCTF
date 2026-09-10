@@ -194,6 +194,8 @@ function InputForm({
   const { toastError } = useStore();
   const [uploading, setUploading] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  const [linkUrl, setLinkUrl] = useState("");
+  const [fetching, setFetching] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const seqRef = useRef(0);
 
@@ -242,6 +244,25 @@ function InputForm({
     }
   };
 
+  // 粘贴附件链接：服务端下载成一个 upload 批次，之后和选文件走同一条 triage 流程
+  const fetchLink = async (): Promise<void> => {
+    const url = linkUrl.trim();
+    if (!url) return;
+    setFetching(true);
+    setTriage(null);
+    try {
+      const label = (url.split("/").filter(Boolean).pop() ?? "attachment").replace(/\.[a-z0-9]{1,8}$/i, "").slice(0, 60) || "attachment";
+      const res = await api.fetchUpload({ url, label });
+      const next = { ...wz, files: [], uploadId: res.upload_id, label };
+      setWz(next);
+      await doTriage(res.upload_id, label, next.kind, next.endpoint, next.hint);
+    } catch (err) {
+      toastError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFetching(false);
+    }
+  };
+
   return (
     <>
       <div className="frow">
@@ -261,6 +282,22 @@ function InputForm({
           <span className="mini">
             {wz.files.length ? `${wz.files.length} 个文件 · ${fmtBytes(wz.files.reduce((a, f) => a + f.size, 0))}` : "elf / apk / pcap / zip / 文本…"}
           </span>
+        </div>
+      </div>
+      <div className="frow">
+        <label>附件链接</label>
+        <div className="flex">
+          <input
+            value={linkUrl}
+            onChange={(e) => setLinkUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void fetchLink();
+            }}
+            placeholder="https://ctf.example/files/task.zip（服务端下载）"
+          />
+          <button className="ghost sm" disabled={fetching || uploading || !linkUrl.trim()} onClick={() => void fetchLink()}>
+            {fetching ? "下载中…" : "下载并判定"}
+          </button>
         </div>
       </div>
       <div className="frow">

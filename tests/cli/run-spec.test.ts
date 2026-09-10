@@ -21,6 +21,38 @@ test("pickRunSource prefers URL, rejects --url with --spec", () => {
   );
 });
 
+test("pickRunSource accepts --input-url and keeps it exclusive", () => {
+  assert.deepEqual(pickRunSource({ "input-url": "https://x.test/files/t.zip" }, []), {
+    kind: "input-url",
+    url: "https://x.test/files/t.zip",
+    challengeKind: undefined,
+    endpoint: undefined,
+    hint: undefined,
+  });
+  const withKind = pickRunSource({ "input-url": "https://x.test/t.zip", kind: "misc" }, []);
+  assert.equal(withKind.kind, "input-url");
+  if (withKind.kind === "input-url") assert.equal(withKind.challengeKind, "misc");
+  const conflicts: Record<string, string | boolean>[] = [
+    { "input-url": "https://x.test/t.zip", input: "./local" },
+    { "input-url": "https://x.test/t.zip", url: "http://lab.example/" },
+    { "input-url": "https://x.test/t.zip", spec: "x.json" },
+  ];
+  for (const flags of conflicts) {
+    assert.throws(
+      () => pickRunSource(flags, []),
+      (e: unknown) => e instanceof DomainError && e.code === "run_source_conflict",
+    );
+  }
+  assert.throws(
+    () => pickRunSource({ "input-url": true }, []),
+    (e: unknown) => e instanceof DomainError && e.code === "invalid_input_url",
+  );
+  assert.throws(
+    () => pickRunSource({ url: "http://lab.example/", kind: "misc" }, []),
+    (e: unknown) => e instanceof DomainError && e.code === "kind_without_input",
+  );
+});
+
 test("specFromUrl fills kali flag spec from the solver slot", () => {
   const dir = mkdtempSync(join(tmpdir(), "rn-quick-"));
   const cat = new ProviderCatalog(dir);
