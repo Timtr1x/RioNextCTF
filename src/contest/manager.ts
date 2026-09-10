@@ -1,9 +1,11 @@
 /**
- * Manager reaction: one short LLM call after the platform rejects a flag.
- * It is an advisor, not a fifth solver — no tools, one JSON reply, low budget.
- * When no manager slot is explicitly assigned we skip the call entirely (the
- * deterministic reject hint from rejectGoalClaim still drives the resume); we
- * never fall back to the solver slot for this.
+ * Manager reaction: one LLM call after the platform rejects a flag. It is an
+ * advisor, not a fifth solver — no tools, one JSON reply. Thinking is on at
+ * max level with a 32768-token call cap (the protocol layer splits that into
+ * up to 16384 thinking + 16384 reply). When no manager slot is explicitly
+ * assigned we skip the call entirely (the deterministic reject hint from
+ * rejectGoalClaim still drives the resume); we never fall back to the solver
+ * slot for this.
  */
 import { ProviderCatalog } from "../provider/catalog.ts";
 import { postJson, type FetchFn } from "../provider/client.ts";
@@ -100,9 +102,10 @@ export async function managerReaction(
       apiKey,
       body: buildProtocolBody(route.provider.protocol, {
         model: route.model.name,
-        max_tokens: 900,
+        max_tokens: 32768,
         user: buildPrompt(input),
-        thinking: "off",
+        thinking: "on",
+        thinking_level: "max",
       }),
       fetchFn: opts?.fetchFn,
       timeoutMs: opts?.timeoutMs ?? 60_000,
