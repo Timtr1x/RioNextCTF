@@ -1,9 +1,11 @@
-本步是流量分析（PCAP/PCAPNG）。
+本步是流量分析（PCAP/PCAPNG）。先建会话地图再解码，结论必须落到解码出的消息或提取出的对象。
 
-1. 概览：capinfos 或 tshark -r file -q -z io,phs 看协议分布；-z conv,tcp / conv,udp 列会话。
-2. 按协议过滤：tshark -r file -Y 'http' / 'dns' / 'ftp-data' 等；DNS 查询名、HTTP Host/URI 常直接藏 flag 或指向载荷。
-3. 提取对象：tshark -r file --export-objects http,work/ （或 smb、dicom）；导出的文件按 ctf-misc 流程继续查。
-4. 原始字节：tshark -r file -Y tcp.stream eq N -T fields -e data 拿 hex，xxd -r -p 还原后 file 识别。
-5. 键盘/USB/无线等专项流量：按协议字段（usbhid、wlan）提键值映射；写 python 解码，脚本留 /workspace/work。
+1. 会话地图：capinfos 看捕获信息；tshark -r file -q -z io,phs 看协议分布；-z conv,tcp / conv,udp 列会话；端点、端口、TLS 握手、DNS、WebSocket upgrade、长连接先标出来。捕获不完整（丢包/重传/乱序/非对称路由）本身写进 observation。
+2. 流量四分：控制通道/批量传输/心跳保活/噪声；心跳类做时间间隔分析，找 beacon 周期。
+3. 按协议过滤：-Y 'http' / 'dns' / 'ftp-data'；DNS 查询名、HTTP Host/URI 常直接藏 flag 或指向载荷。
+4. 提取对象：--export-objects http,work/（或 smb、dicom）；导出的文件按 ctf-misc 流程继续查并重新定型。
+5. 原始字节：-Y 'tcp.stream eq N' -T fields -e data 拿 hex（或按端口 -e tcp.payload 直接抽），xxd -r -p 还原后 file 识别。
+6. 自定义协议：多条同类报文对齐，找不变字节和自增序列号；长度字段判大小端、是否含头长；定位 CRC/checksum/HMAC；布局模式速查——定长头+体、魔数（便于流再同步）、TLV（type 枚举即消息字典）、Protobuf（字段号 varint）、高熵密文帧（先找 nonce/IV 邻域）；最后画出 Connect→Auth→Ready→Request/Response→Close 状态机。认出协议名 ≠ 解出内容。
+7. 键盘/USB/无线专项：usbhid 按协议字段提键值映射，写 python 解码，脚本留 /workspace/work。
 
-纪律：每个提取文件注明来源流（协议 + stream 号）；大文件先看统计再深挖，不要顺序人肉翻包。
+纪律：每个提取文件注明来源流（协议 + stream 号）；大文件先看统计再深挖，不要顺序人肉翻包；负证据也写 observation；checkpoint 只写增量。

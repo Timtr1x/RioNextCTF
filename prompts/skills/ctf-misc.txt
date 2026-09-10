@@ -1,10 +1,12 @@
 本步是 Misc（隐写/取证/杂项）。按固定顺序过一遍，每一步记录命令和结果，别跳步。
 
 1. 清单：对照 manifest 的 sha256；file、exiftool 全量元数据（注释、相机型号、缩略图都可能藏东西）。
-2. 容器：binwalk -e 提取嵌入文件（只扫不炸：先 binwalk 看签名再 -e）；压缩包用 7z/unzip 解到 /workspace/work，加密压缩包先找密码线索再 john。
-3. 图片：pngcheck -v 看块结构；zsteg（PNG/BMP 低bit）、steghide（JPEG，空口令先试）、stegseek；identify 看尺寸异常；尾部附加数据用 xxd 对比 IEND 之后的内容。
-4. 音视频：ffprobe 看流；ffmpeg 抽帧/抽音频到 work/；频谱图先把音频转 wav 再看；zbarimg 读二维码。
-5. 文档：pdftotext/qpdf --qdf 看隐藏层和附件；Office 文档 unzip 后看 media/ 和宏（ctf-python 里有 oletools）。
-6. 磁盘/内存镜像：v1 没有 volatility，用 strings、binwalk、sleuthkit 思路手工提文件。
+2. 容器真值：声明格式 vs 实际结构——pngcheck -v 看块、xxd 看头尾，专抓 polyglot、尾部附加数据（IEND/EOCD 之后）、畸形 trailer；binwalk 先看签名再 -e 提取。
+3. 压缩包：先 sha256sum + 7z l -slt 记录条目/方法/加密标志/尺寸/CRC 再动手；加密包先看 Method 分 ZipCrypto 还是 AES，把题面和文件名的密码线索榨干后才 john。注意：ZIP 本地头 PK\x03\x04 是归档元数据不是明文样本；stored 条目和已知格式头才是已知明文锚点（v1 无 bkcrack，已知明文攻击不可用，专心线索+john）。
+4. 图片：zsteg（PNG/BMP 低 bit）、steghide（JPEG，空口令先试）、stegseek；按证据排候选信道：alpha 通道、调色板顺序、RGB/YUV 平面、采样 LSB、帧间差分。
+5. 音视频：ffprobe 看流；ffmpeg 抽帧/抽音频到 work/；频谱先转 wav；zbarimg 读二维码。
+6. 文档：pdftotext/qpdf --qdf 看隐藏层和附件；Office 文档 unzip 后看 media/ 和宏（ctf-python 里有 oletools）。
+7. 固件：binwalk -E 读熵（0–0.3 填充、0.3–0.7 代码、0.7–0.95 压缩、0.95+ 加密或高熵压缩——高熵≠加密）；提取失败按序兜底：binwalk -eM 递归 → xxd|grep 搜 hsqs/sqsh 和 1f 8b 08 → binwalk --offset 256/4096 → dd 按熵分段切片单独 file+binwalk。rootfs 提出后立即做六件事：etc/inittab 与 init.d/rcS、grep -rE "(password|passwd|secret|token|api_key)="、find httpd/cgi-bin、find telnetd/dropbear、etc/passwd 与 shadow、strings busybox 看 banner。
+8. 磁盘/内存镜像：用 strings、binwalk 手工提文件；取证时间线先挑锚点事件（首次执行/登录/会话），事件关联靠 PID/路径等标识符，不靠时间戳接近。
 
-纪律：每个派生文件记录来源命令；隐写工具一把梭不出结果就换思路看元数据和容器结构，不要无限调参；找到的候选 flag 按题面格式校验后再提交。
+簿记：每层提取单独存盘并标注产物类型（明文/另一层容器/压缩/密文）；派生文件记录来源命令并重新过一遍定型；隐写工具一把梭不出结果就换思路看元数据和容器结构，不要无限调参；候选 flag 按题面格式校验后再提交。负证据也写 observation；连续 3 次工具调用没有新观察就写下当前假设换方向；checkpoint 只写增量。

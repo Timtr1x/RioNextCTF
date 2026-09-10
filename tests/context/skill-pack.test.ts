@@ -74,6 +74,9 @@ test("execute on an input campaign gets the family skill; web gets null", () => 
     assert.match(skill, /逆向/);
     assert.match(skill, /\bgdb\b/);
     assert.match(skill, /r2/);
+    assert.match(skill, /未列出的一律不可用/);
+    assert.match(skill, /- 逆向\/利用: /);
+    assert.match(skill, /ctf-python 已装库: .*pwntools/);
     assert.equal(pack.system_prompt.includes("kali_run"), true); // execute prompt unchanged location
 
     // same campaign, step from another family keeps campaign bins but swaps text
@@ -140,7 +143,10 @@ test("input campaign without a mapped family falls back to the seed family", () 
     e.createCampaign(spec);
     const stepId = seedStep(e, "camp_gen", "ctf-triage");
     const pack = buildContextPack(e.storage, lease("camp_gen", "execute", stepId));
-    assert.match(payload(pack).skill_pack as string, /侦察/);
+    const genSkill = payload(pack).skill_pack as string;
+    assert.match(genSkill, /侦察/);
+    assert.match(genSkill, /后台执行（返回 execution_id，勿轮询）: wget/);
+    assert.match(genSkill, /- 网络: curl wget/);
   } finally {
     e.close();
   }

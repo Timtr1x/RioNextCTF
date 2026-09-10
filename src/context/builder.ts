@@ -4,7 +4,7 @@ import { SKILL_BY_METHOD_FAMILY } from "../domain/challenge-kind.ts";
 import { hashJson } from "../domain/fingerprint.ts";
 import type { ContextManifest, ReadSetEntry, RunLease } from "../domain/types.ts";
 import type { StorageService } from "../storage/service.ts";
-import { allowedBinsFor, isKaliProfile } from "../tools/kali-profile.ts";
+import { binGroupsFor, isKaliProfile, KALI_BACKGROUND_BINS, pyLibsFor } from "../tools/kali-profile.ts";
 import { PROMPT_VERSION } from "../version.ts";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -47,9 +47,10 @@ export function loadSkill(file: string): string | null {
 
 /**
  * Execute-only, kali-only, input-campaigns-only. The step's method_family picks
- * one skill file; the kind's binary allowlist is listed in the header so the
- * model can see what exists without guessing. Web campaigns carry no
- * spec.challenge and always get skill_pack: null.
+ * one skill file; the header lists the kind's allowlist by purpose so the model
+ * sees what exists without probing (unlisted tools are banned), flags the
+ * background scanners, and names the ctf-python libraries. Web campaigns carry
+ * no spec.challenge and always get skill_pack: null.
  */
 function buildSkillPack(
   camp: { spec: { execution_profile: string; challenge?: { kind: string; seed_method_family: string } } },
@@ -66,8 +67,18 @@ function buildSkillPack(
   if (!file) return null;
   const text = loadSkill(file);
   if (!text) return null;
-  const bins = [...allowedBinsFor(challenge.kind)].sort().join(" ");
-  return [`# ${family}（${challenge.kind}）`, `本战役可直接运行的二进制：${bins}`, "", text].join("\n");
+  const lines = [`# ${family}（${challenge.kind}）`, "本战役可用工具（未列出的一律不可用，禁止 apt/pip 安装）："];
+  const background: string[] = [];
+  for (const [label, bins] of binGroupsFor(challenge.kind)) {
+    const list = [...bins].sort();
+    lines.push(`- ${label}: ${list.join(" ")}`);
+    for (const b of list) if (KALI_BACKGROUND_BINS.has(b)) background.push(b);
+  }
+  if (background.length > 0) {
+    lines.push(`后台执行（返回 execution_id，勿轮询）: ${background.sort().join(" ")}`);
+  }
+  lines.push(`ctf-python 已装库: ${pyLibsFor(challenge.kind).join(" ")}`, "", text);
+  return lines.join("\n");
 }
 
 export function buildContextPack(storage: StorageService, lease: RunLease, extra: Record<string, unknown> = {}): ContextPack {

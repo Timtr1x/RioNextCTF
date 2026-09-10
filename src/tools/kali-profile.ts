@@ -100,7 +100,6 @@ export const BINARY_BINS = new Set([
   "qemu-arm",
   "qemu-aarch64",
   "ROPgadget",
-  "ropper",
   "one_gadget",
   "gcc",
   "g++",
@@ -136,6 +135,49 @@ export const MISC_BINS = new Set([
 ]);
 
 export const CRYPTO_BINS = new Set(["openssl", "john", "hashcat", "gp"]);
+
+/** ctf-python libraries per capability group; mirrors the image tool-index. */
+export const CTF_PY_LIBS = {
+  binary: ["pwntools", "angr", "capstone", "unicorn", "z3", "pyelftools"],
+  misc: ["scapy", "Pillow", "oletools", "numpy"],
+  crypto: ["pycryptodome", "sympy", "gmpy2", "fpylll", "z3"],
+} as const;
+
+/** Labelled binary groups for the skill_pack header, per challenge kind. */
+export function binGroupsFor(kind: string): Array<[string, ReadonlySet<string>]> {
+  const groups: Array<[string, ReadonlySet<string>]> = [
+    ["基础", BASE_BINS],
+    ["CTF 通用", CTF_BASE_BINS],
+  ];
+  const push = (label: string, bins: ReadonlySet<string>) => {
+    if (!groups.some(([, s]) => s === bins)) groups.push([label, bins]);
+  };
+  if (kind === "reverse" || kind === "pwn") push("逆向/利用", BINARY_BINS);
+  else if (kind === "misc") push("Misc/取证", MISC_BINS);
+  else if (kind === "crypto") push("密码", CRYPTO_BINS);
+  else {
+    push("逆向/利用", BINARY_BINS);
+    push("Misc/取证", MISC_BINS);
+    push("密码", CRYPTO_BINS);
+    push("网络", new Set(["curl", "wget"]));
+  }
+  return groups;
+}
+
+/** ctf-python library list for the skill_pack header, per challenge kind. */
+export function pyLibsFor(kind: string): string[] {
+  const out = new Set<string>();
+  const add = (libs: readonly string[]) => libs.forEach((l) => out.add(l));
+  if (kind === "reverse" || kind === "pwn") add(CTF_PY_LIBS.binary);
+  else if (kind === "misc") add(CTF_PY_LIBS.misc);
+  else if (kind === "crypto") add(CTF_PY_LIBS.crypto);
+  else {
+    add(CTF_PY_LIBS.binary);
+    add(CTF_PY_LIBS.misc);
+    add(CTF_PY_LIBS.crypto);
+  }
+  return [...out];
+}
 
 function union(...sets: ReadonlySet<string>[]): Set<string> {
   const out = new Set<string>();

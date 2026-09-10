@@ -1,11 +1,16 @@
-本步处理未定型的挑战附件。先做一轮确定性侦察，把题型收敛，再按对应流程走。
+本步处理未定型的挑战附件。先做一轮确定性侦察，按特异度收敛题型，再按对应流程走。
 
-1. 全量过一遍 input/original：file 每个文件；text 文件通读；sha256sum 对照 manifest。
-2. 压缩包/归档：7z l 列内容再决定解什么；别递归解压嵌套压缩包超过两层，先记录结构。
-3. 出现可执行文件（ELF/PE）：转逆向流程——checksec、strings、readelf；有远程端点按 pwn 处理。
-4. 出现图片/音频/文档：转 misc 流程——元数据、binwalk、隐写工具。
-5. 出现 PCAP：转流量流程——协议统计、会话、对象导出。
-6. 出现密文/大整数参数：转密码流程——先分类编码/RSA/对称。
-7. 侦察完仍无法定型：把已排除的类型和理由写成 observation，用 propose_step 建议一个具体方向的后续 step（method_family 用 reverse-native / ctf-misc / ctf-crypto / pwn-chain 之一），然后 finish_step。
+1. 侦察清单未跑完不得以"信息不足"结束：input/original 全量 file、text 通读、sha256sum 对照 manifest。
+2. 定型按特异度排序，先匹配最具体的特征，全不中才按文件大类走通用流程：
+   - RSA/密文参数（n= e= c= 大整数、BEGIN PUBLIC KEY、密文脚本）→ ctf-crypto
+   - 加密压缩包 → 先 7z l -slt 看 Method 分 ZipCrypto/AES，再进 ctf-misc 压缩包流程
+   - usbhid 键盘流、自定义协议长连接 → protocol-pcap
+   - 固件 magic（TRX=HDR0、uImage=27 05 19 56、squashfs=hsqs、gzip=1f 8b）→ ctf-misc 固件流程
+   - ELF/PE/Mach-O → reverse-native；另给远程端点（nc host port）→ pwn-chain
+   - APK → apk-reverse；PE 带 COM descriptor（.NET）→ dotnet-reverse
+   - 图片/音频/视频/文档 → ctf-misc
+3. 复合样本不猜归属：PCAP 里导出 ELF、图片里嵌压缩包，各自独立定型；任何提取/解码出的新文件重新过一遍本表，不继承父文件的流程。
+4. 结论必须写明命中的具体特征（file 输出/magic bytes/题面措辞）；写不出命中特征的按未定型处理，不许选"更像"的那个。题面措辞只能当 tiebreaker，权重低于 magic bytes。
+5. 仍无法定型：把侦察输出、已排除类型和理由写成 observation，propose_step 建议一个具体方向（reverse-native / ctf-misc / ctf-crypto / pwn-chain / protocol-pcap 之一），然后 finish_step。
 
-纪律：侦察步不许执行未知二进制；不许爆破式尝试；结论必须有命令输出支撑。
+纪律：不许执行未知二进制；不许爆破式尝试；负证据也写 observation（查过且没有，附命令）；checkpoint 只写增量（新发现、已排除方向、下一步意图）。

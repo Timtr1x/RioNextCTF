@@ -32,7 +32,7 @@ test("allowedBinsFor(web) equals the legacy set", () => {
 test("reverse/pwn see binary tools but no web scanners", () => {
   for (const kind of ["reverse", "pwn"]) {
     const bins = allowedBinsFor(kind);
-    for (const b of ["gdb", "r2", "checksec", "readelf", "ROPgadget", "ropper", "qemu-x86_64", "socat", "nc", "ctf-python", "gcc"]) {
+    for (const b of ["gdb", "r2", "checksec", "readelf", "ROPgadget", "qemu-x86_64", "socat", "nc", "ctf-python", "gcc"]) {
       assert.ok(bins.has(b), `${kind} missing ${b}`);
     }
     for (const b of ["nmap", "sqlmap", "nuclei", "gobuster", "curl", "chromium"]) {

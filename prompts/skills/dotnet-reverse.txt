@@ -1,8 +1,9 @@
-本步是 .NET 程序集逆向。v1 没有 ilspy，走元数据 + 字节码路线。
+本步是 .NET 程序集逆向。v1 没有 ilspy/mono，只能静态还原。
 
-1. file / objdump -x 确认 PE 和 .NET（COM descriptor）。strings -a -e l（UTF-16）经常直接出 flag、密钥、提示——.NET 字符串是 UTF-16 存的。
-2. monodis 不存在时用 python 解析：ctf-python 里可 pip 不可用就手写——#Strings 堆在元数据里，strings -e l 已覆盖大部分。
-3. 找入口和校验函数：strings 出的方法名、窗体文本（"Check"、"Flag"）定位逻辑；条件分支通常是字符串比较或简单变换（XOR/移位/Base64）。
-4. 还原算法后写 python 求解并本地验证；需要跑程序集时用 qemu 没用——.NET 需要 mono/dotnet，v1 不支持执行，只能静态还原。
+1. 确认托管：file / objdump -x 看 PE 的 COM descriptor（CLR 头）；strings 出 mscorlib、_CorExeMain 佐证。无 CLR 头但有 System.Private.CoreLib 是 NativeAOT/IL2CPP，转 reverse-native 流程。
+2. strings -a -e l（UTF-16）经常直接出 flag、密钥、提示——.NET 字符串是 UTF-16 存的。
+3. 混淆识别定策略：乱码类名 + switch 控制流平坦化 = ConfuserEx；字符串编码 + 资源压缩 = SmartAssembly；方法体空壳、运行时从资源解密注入 = .NET Reactor。字符串解密器定位：找"被大量调用、参数是数字常量、返回 string"的静态方法，静态照写它就能批量解出全部明文字符串。
+4. 分析顺序：先看 <module> 的 .cctor（静态构造，解密和 anti-tamper 初始化最先执行），再看 Main 和校验函数。警惕异常驱动控制流：try{ throw }catch{ switch(e.Code) } 是伪装成异常处理的跳转表。
+5. 配置提取：找 byte[] 字段 + AES/XOR 解密方法；警惕 AES Key==IV 的偷懒模式。条件分支通常是字符串比较或简单变换（XOR/移位/Base64），还原算法后写 python 求解。
 
-纪律：UTF-16 字符串是重点；还原出的 flag 先过一遍题面校验逻辑再提交。
+纪律：UTF-16 字符串是重点；还原出的 flag 先过一遍题面校验逻辑再提交；负证据也写 observation；checkpoint 只写增量。
