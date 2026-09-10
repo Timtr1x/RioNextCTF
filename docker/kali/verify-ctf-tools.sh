@@ -18,7 +18,7 @@ require_bin() {
 for b in file strings readelf objdump nm ldd gdb gdbserver checksec \
          r2 rabin2 rasm2 radiff2 strace ltrace patchelf \
          qemu-x86_64 qemu-i386 qemu-arm qemu-aarch64 \
-         gcc g++ make socat nc ROPgadget ropper one_gadget; do
+         gcc g++ make socat nc ROPgadget one_gadget; do
   require_bin "$b"
 done
 # misc / forensics / stego
@@ -48,7 +48,7 @@ python3 -c 'print(1)' >/dev/null
 $VENV/bin/python - <<'PY'
 import importlib, sys
 mods = {
-    "binary": ["pwn", "angr", "lief", "capstone", "unicorn", "z3"],
+    "binary": ["pwn", "angr", "capstone", "unicorn", "z3"],
     "misc": ["scapy", "PIL", "oletools"],
     "crypto": ["Crypto", "sympy", "gmpy2", "fpylll"],
 }
@@ -73,14 +73,14 @@ commands = {
     "binary": ["file", "strings", "readelf", "objdump", "nm", "ldd", "gdb", "gdbserver", "checksec",
                "r2", "rabin2", "rasm2", "radiff2", "strace", "ltrace", "patchelf",
                "qemu-x86_64", "qemu-i386", "qemu-arm", "qemu-aarch64", "gcc", "g++", "make", "socat", "nc",
-               "ROPgadget", "ropper", "one_gadget", "ctf-python"],
+               "ROPgadget", "one_gadget", "ctf-python"],
     "misc": ["binwalk", "foremost", "exiftool", "steghide", "stegseek", "zsteg", "pngcheck",
              "identify", "convert", "ffmpeg", "ffprobe", "zbarimg", "tesseract",
              "7z", "unzip", "zipinfo", "qpdf", "pdfinfo", "pdftotext", "tshark", "tcpdump", "capinfos"],
     "crypto": ["openssl", "john", "hashcat", "gp"],
 }
 python_modules = {
-    "binary": ["pwn", "angr", "lief", "capstone", "unicorn", "z3"],
+    "binary": ["pwn", "angr", "capstone", "unicorn", "z3"],
     "misc": ["scapy", "PIL", "oletools"],
     "crypto": ["Crypto", "sympy", "gmpy2", "fpylll"],
 }
