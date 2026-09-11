@@ -68,12 +68,13 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 ```
 .\rionext.cmd run --input .\crackme.elf
 .\rionext.cmd run --input .\pwn-dir --endpoint tcp://host:31337
+.\rionext.cmd run --input .\web-src --web-url http://host:8080/
 .\rionext.cmd run --input .\cipher.txt --kind crypto
 .\rionext.cmd run --input .\challenge --hint "题面描述"
 .\rionext.cmd run --input-url https://ctf.example/files/task.zip
 ```
 
-`--input` 把文件/目录复制进战役工作区（`.rionext/workspace/<id>/input/original`，附 SHA-256 清单），在宿主机做确定性分诊（magic bytes / ELF / PE / ZIP 目录，不执行样本），按题型选二进制白名单，并给 Execute 注入对应的短 skill（`prompts/skills/`）。`--kind auto|reverse|pwn|misc|crypto|generic` 显式覆盖分诊；`--endpoint` 只接受 `tcp://host:port`。`--input-url` 先在宿主机下载附件（浏览器 UA、120s 超时、256MB 上限），之后和 `--input` 完全同路，同一链接再跑 resume 同一战役。`--input`/`--input-url` 互相排斥，也都不能和 `--url`/`--spec` 同用。Web 战役的 prompt、工具 schema、白名单逐字节不变（`tests/contract/web-golden.test.ts` 锁定）。CTF 工具链在镜像的独立层，改了要重建：`npm run kali:build`。同一路径再跑会 resume 同一战役；想换 `--kind` 重判就换 `--id` 或删掉旧战役。
+`--input` 把文件/目录复制进战役工作区（`.rionext/workspace/<id>/input/original`，附 SHA-256 清单），在宿主机做确定性分诊（magic bytes / ELF / PE / ZIP 目录，不执行样本），按题型选二进制白名单，并给 Execute 注入对应的短 skill（`prompts/skills/`）。`--kind auto|reverse|pwn|misc|crypto|generic` 显式覆盖分诊；`--endpoint` 只接受 `tcp://host:port`；`--web-url` 接受 `http(s)://...`，给"发源码的 web 题"用，靶机地址进 scope 和题面，agent 先读源码再打 live 靶机。`--input-url` 先在宿主机下载附件（浏览器 UA、120s 超时、256MB 上限），之后和 `--input` 完全同路，同一链接再跑 resume 同一战役。`--input`/`--input-url` 互相排斥，也都不能和 `--url`/`--spec` 同用。Web 战役的 prompt、工具 schema、白名单逐字节不变（`tests/contract/web-golden.test.ts` 锁定）。CTF 工具链在镜像的独立层，改了要重建：`npm run kali:build`。同一路径再跑会 resume 同一战役；想换 `--kind` 重判就换 `--id` 或删掉旧战役。
 
 `--url` 和 `--spec` 不能一起用。命中 `flag_recovered` 会停在 `awaiting_verify`：
 
@@ -94,13 +95,13 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 .\rionext.cmd hint [id] --text "不要用容器 php 当 unserialize 预言机"
 .\rionext.cmd facts|steps|findings|events|operations|report [id]
 .\rionext.cmd observations|invocations|coverage|goals|artifacts [id]
-.\rionext.cmd revise-budget [id] --max-calls 3000 --max-tokens 80000000
+.\rionext.cmd revise-budget [id] --max-calls 3000 --max-tokens 120000000
 .\rionext.cmd explain-step [id] --step step_...
 ```
 
 `run` / `start` 常用开关：`--progress-ms 60000`（`0` 关掉进度）、`--max-execute-turns 72`、`--max-tool-calls 144`、`--no-finalization`。
 
-默认：一段 Execute 72 轮模型、144 次工具；预算 3000 calls、80_000_000 tokens。Execute Finalize 默认开，Primary 没交 `finish_step` 时补交一次。
+默认：一段 Execute 72 轮模型、144 次工具；预算 3000 calls、120_000_000 tokens。Execute Finalize 默认开，Primary 没交 `finish_step` 时补交一次。
 
 同一战役不要再开一个 `start`。正在跑的进程用的还是旧 `dist`。
 
@@ -126,6 +127,8 @@ token 只从 `--token-file` 或 `RIONEXT_CONTEST_TOKEN` 环境变量读，不进
 选题不问模型，照一张写死的排序表来。第一层是不需要连接、不需要附件的静态 web/misc/crypto，第二层是要起容器的 web，第三层是带附件的 misc/crypto，pwn 和 reverse 这些硬骨头垫后。层内按分值从低到高排，同分比解出人数，人多的先打。理由很朴素。开赛抢的是又快又稳的分，让模型自己挑题，它总会被好玩的题勾走。
 
 每道题映射成一个标准 RioNext 战役，id 是 `camp_q_<题目id>`。标题、分类、分值、连接方式、题目描述写进战役的 `brief.txt`，附件由宿主机提前下载好，下载带浏览器 UA，token 不外发。最多 4 个战役并行，`--slots` 可以在 1 到 8 之间调。
+
+题型和战役怎么对应：只有靶机的 web 题开纯 web 战役；web 题同时给靶机和源码附件时，开附件战役、靶机地址写进 scope 和题面，agent 先读源码再打靶机；pwn 的 `nc host port` 加附件同理走 `--endpoint`。平台中途换靶机地址时督导会更新战役 scope，web 和 tcp 两个入口都会带上。
 
 4 个战役共用 1 个 Kali 容器 `rionext-kali-contest`，不是一战役一个。容器给 16g 内存和 8 个 CPU，挂载的是比赛工作区的父目录，每个战役在容器里用自己的 `/workspace/<campaignId>` 子目录。有件事要说清楚。容器启动时丢了全部 capability，iptables 规则写不进去，容器内的出站限制从来没真正生效过，真正的闸门一直在宿主机的 admitNet 上。共享容器没有削弱任何实际存在的隔离。
 

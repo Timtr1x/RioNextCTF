@@ -199,6 +199,7 @@ export class EngineRunnerFactory implements RunnerFactory {
           path: inputDir,
           challengeKind: plan.kind,
           endpoint: plan.endpoint ?? undefined,
+          webUrl: plan.webUrl ?? undefined,
           hint: q.description.slice(0, 2000) || q.title,
         },
         this.contestDir,

@@ -41,6 +41,7 @@ test("pickRunSource validates --input/--kind/--endpoint combinations", () => {
     path: "./chal",
     challengeKind: undefined,
     endpoint: undefined,
+    webUrl: undefined,
     hint: undefined,
   });
   assert.throws(
@@ -136,6 +137,45 @@ test("endpoint lands in scope assets and the seed question", () => {
   assert.deepEqual(spec.scope.assets, ["pwn.example:31337"]);
   assert.match(spec.root_goal.statement, /tcp:\/\/pwn\.example:31337/);
   assert.match(loaded.seed?.question ?? "", /tcp:\/\/pwn\.example:31337/);
+});
+
+test("web-url lands in challenge, scope, statement and the seed question", () => {
+  const dir = tmp();
+  withSolver(dir);
+  const src = join(dir, "websrc");
+  writeFileSync(src, "<?php echo 1; ?>");
+  const loaded = specFromInput({ kind: "input", path: src, webUrl: "http://web.example:8080/" }, dir);
+  const spec = loaded.spec as {
+    challenge: { web_url?: string; endpoint?: string };
+    scope: { assets: string[]; entries: string[] };
+    root_goal: { statement: string };
+  };
+  assert.equal(spec.challenge.web_url, "http://web.example:8080/");
+  assert.equal(spec.challenge.endpoint, undefined);
+  assert.deepEqual(spec.scope.assets, ["web.example", "http://web.example:8080/"]);
+  assert.deepEqual(spec.scope.entries, ["http://web.example:8080/"]);
+  assert.match(spec.root_goal.statement, /http:\/\/web\.example:8080\//);
+  assert.match(spec.root_goal.statement, /source code/);
+  assert.match(loaded.seed?.question ?? "", /web\.example:8080/);
+});
+
+test("web-url and endpoint compose in one spec", () => {
+  const dir = tmp();
+  withSolver(dir);
+  const src = join(dir, "chall");
+  writeFileSync(src, elf64());
+  const loaded = specFromInput(
+    { kind: "input", path: src, endpoint: { host: "pwn.example", port: 31337 }, webUrl: "http://panel.example/" },
+    dir,
+  );
+  const spec = loaded.spec as {
+    challenge: { endpoint?: string; web_url?: string };
+    scope: { assets: string[]; entries: string[] };
+  };
+  assert.equal(spec.challenge.endpoint, "tcp://pwn.example:31337");
+  assert.equal(spec.challenge.web_url, "http://panel.example/");
+  assert.deepEqual(spec.scope.assets, ["pwn.example:31337", "panel.example", "http://panel.example/"]);
+  assert.deepEqual(spec.scope.entries, ["tcp://pwn.example:31337", "http://panel.example/"]);
 });
 
 test("seeded step is ready and survives campaign creation", () => {

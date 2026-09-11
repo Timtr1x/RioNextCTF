@@ -83,6 +83,7 @@ Or a local CTF challenge (file or directory):
 
   rionext run --input ./crackme.elf
   rionext run --input ./pwn-dir --endpoint tcp://host:31337
+  rionext run --input ./web-src --web-url http://host:8080/
   rionext run --input ./cipher.txt --kind crypto
   rionext run --input ./challenge --hint "task description text"
   rionext run --input-url https://ctf.example/files/task.zip
@@ -90,10 +91,12 @@ Or a local CTF challenge (file or directory):
   --input copies attachments into the workspace with a SHA-256 manifest,
   classifies the challenge (reverse/pwn/misc/crypto/generic) without
   executing it, and seeds a ready step. --kind overrides classification.
-  --input-url downloads the attachment host-side first (browser UA, 120s
-  timeout, 256MB cap), then behaves exactly like --input; re-running the same
-  link resumes the same campaign. --input/--input-url are mutually exclusive
-  with each other, --url, and --spec.
+  --endpoint adds a tcp service target; --web-url adds a live http(s) app
+  (web challenges that also hand out source). --input-url downloads the
+  attachment host-side first (browser UA, 120s timeout, 256MB cap), then
+  behaves exactly like --input; re-running the same link resumes the same
+  campaign. --input/--input-url are mutually exclusive with each other,
+  --url, and --spec.
 
 Or a spec file:
 
@@ -149,7 +152,7 @@ Flags on run/start:
   --finalization or RIONEXT_FINALIZATION=1 still force it on
   --json
 
-Budget defaults: 3000 calls, 80_000_000 tokens, 1000 controller cycles.
+Budget defaults: 3000 calls, 120_000_000 tokens, 1000 controller cycles.
 Flag claims stop at awaiting_verify until rionext accept.
 More detail: docs/ops.md
 `;

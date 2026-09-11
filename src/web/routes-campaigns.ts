@@ -5,7 +5,7 @@ import { applyKindOverride, isChallengeKind, parseTcpEndpoint, type ChallengeKin
 import { classifyChallenge } from "../domain/challenge-triage.ts";
 import { invalidInput } from "../domain/errors.ts";
 import { MAX_INPUT_FILE_BYTES, MAX_INPUT_TOTAL_BYTES, originalRoot, stageInput } from "../domain/input-manifest.ts";
-import { campaignIdForInput } from "../domain/quick-spec.ts";
+import { campaignIdForInput, parseTargetUrl } from "../domain/quick-spec.ts";
 import { seedChallengeStep, specFromInput, specFromUrl, type RunSource } from "../cli/run-spec.ts";
 import type { CampaignSpec } from "../domain/types.ts";
 import type { ApiContext, ApiHandler } from "./server.ts";
@@ -49,6 +49,7 @@ interface CreateBody {
   label?: string;
   kind?: string;
   endpoint?: string;
+  web_url?: string;
   hint?: string;
   id?: string;
   start?: boolean;
@@ -79,12 +80,13 @@ function resolveInputSource(ctx: ApiContext, body: CreateBody): Extract<RunSourc
     if (kindRaw !== "auto") challengeKind = kindRaw;
   }
   const endpoint = body.endpoint ? parseTcpEndpoint(body.endpoint) : undefined;
+  const webUrl = body.web_url && body.web_url.trim() ? parseTargetUrl(body.web_url).toString() : undefined;
   let path = typeof body.input_path === "string" && body.input_path !== "" ? body.input_path : "";
   if (body.upload_id) {
     path = join(uploadDir(ctx.dataDir, body.upload_id), "files");
   }
   if (!path) throw invalidInput("missing_input", "input_path or upload_id is required");
-  return { kind: "input", path, challengeKind, endpoint, hint: body.hint, id: body.id };
+  return { kind: "input", path, challengeKind, endpoint, webUrl, hint: body.hint, id: body.id };
 }
 
 async function createCampaign(ctx: ApiContext): Promise<unknown> {
@@ -255,7 +257,7 @@ async function fetchUploadBody(ctx: ApiContext): Promise<unknown> {
 }
 
 async function triageBody(ctx: ApiContext): Promise<unknown> {
-  const body = await ctx.json<{ upload_id?: string; input_path?: string; label?: string; kind?: string; endpoint?: string; hint?: string }>();
+  const body = await ctx.json<{ upload_id?: string; input_path?: string; label?: string; kind?: string; endpoint?: string; web_url?: string; hint?: string }>();
   const source = resolveInputSource(ctx, body);
   const abs = resolve(source.path);
   const label = body.label?.trim() || (body.upload_id ? uploadLabel(ctx.dataDir, body.upload_id) : null) || basename(abs);

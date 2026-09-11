@@ -93,6 +93,9 @@ export function buildInputFlagSpec(args: {
   detected_kind?: Exclude<ChallengeKind, "auto">;
   input: { source_name: string; files: number; total_bytes: number; sha256: string };
   endpoint?: TcpEndpoint;
+  /** Live web app paired with the staged files (web challenges that hand out
+   *  source). Validated http(s); joins scope assets/entries and the statement. */
+  web_url?: string;
   thinking_level?: CampaignSpec["model_policy"]["thinking_level"];
   /** Container-side workspace root in the prompt text. Defaults to /workspace;
    *  the contest shared container passes /workspace/<campaignId>. */
@@ -108,10 +111,15 @@ export function buildInputFlagSpec(args: {
   const endpointText = args.endpoint
     ? ` The remote service is reachable from inside the campaign container at tcp://${args.endpoint.host}:${args.endpoint.port} (use pwntools remote() or nc).`
     : "";
+  const webUrl = args.web_url ? parseTargetUrl(args.web_url).toString() : null;
+  const webHost = webUrl ? new URL(webUrl).hostname : null;
+  const webText = webUrl
+    ? ` A live web application for this challenge runs at ${webUrl} (reachable from inside the campaign container); the staged files are its source code or supporting material. Read the source first, then probe the live app.`
+    : "";
   const statement =
     `Authorized ${label} challenge. Challenge files are staged at ${root}/input/original ` +
     `(SHA-256 manifest at ${root}/input/manifest.json). Treat input/original as read-only; ` +
-    `write scripts and scratch output to ${root}/work and final evidence to ${root}/artifacts.${endpointText} ` +
+    `write scripts and scratch output to ${root}/work and final evidence to ${root}/artifacts.${endpointText}${webText} ` +
     `Recover the flag. When you have the flag, submit a fact with fact_key flag_recovered and the flag string in the proposition.`;
   const challenge: ChallengeInfo = {
     kind: triage.kind,
@@ -123,16 +131,23 @@ export function buildInputFlagSpec(args: {
   };
   if (args.detected_kind && args.detected_kind !== triage.kind) challenge.detected_kind = args.detected_kind;
   if (args.endpoint) challenge.endpoint = `tcp://${args.endpoint.host}:${args.endpoint.port}`;
+  if (webUrl) challenge.web_url = webUrl;
+  const assets = args.endpoint ? [`${args.endpoint.host}:${args.endpoint.port}`] : [];
+  const entries = args.endpoint ? [`tcp://${args.endpoint.host}:${args.endpoint.port}`] : [];
+  if (webUrl && webHost) {
+    assets.push(webHost, webUrl);
+    entries.push(webUrl);
+  }
   return {
     campaign_id: args.campaign_id,
     schema_version: SCHEMA_VERSION,
     mode: "goal_seeking",
     root_goal: { statement, success_predicate_ref: "flag_recovered" },
     scope: {
-      assets: args.endpoint ? [`${args.endpoint.host}:${args.endpoint.port}`] : [],
+      assets,
       workspace: "kali",
       identities: ["operator"],
-      entries: args.endpoint ? [`tcp://${args.endpoint.host}:${args.endpoint.port}`] : [],
+      entries,
       exclusions: [],
       profile: "kali-lab",
     },

@@ -70,6 +70,7 @@ export const api = {
     label?: string;
     kind?: string;
     endpoint?: string;
+    web_url?: string;
     hint?: string;
     id?: string;
     start?: boolean;
@@ -112,7 +113,7 @@ export const api = {
       "/api/uploads/fetch",
       body,
     ),
-  triage: (body: { upload_id?: string; input_path?: string; label?: string; kind?: string; endpoint?: string; hint?: string }) =>
+  triage: (body: { upload_id?: string; input_path?: string; label?: string; kind?: string; endpoint?: string; web_url?: string; hint?: string }) =>
     post<TriagePreview>("/api/triage", body),
 
   catalog: () => get<Catalog>("/api/catalog"),

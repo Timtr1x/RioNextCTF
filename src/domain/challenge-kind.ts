@@ -91,6 +91,8 @@ export interface ChallengeInfo {
     sha256: string;
   };
   endpoint?: string;
+  /** Live web target for mixed challenges (source/attachments + a running app). */
+  web_url?: string;
 }
 
 export interface TcpEndpoint {

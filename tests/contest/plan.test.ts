@@ -84,17 +84,55 @@ test("planFor maps question shapes to launch plans", () => {
     kind: "pwn",
     endpoint: { host: "10.0.0.8", port: 31337 },
     fileUrl: "https://cdn/pwn.tgz",
+    webUrl: null,
   });
 
   // misc keeps the classifier (overlay survival), even with an attachment
   const misc = q({ category: "misc", file_url: "https://cdn/a.pcap" });
-  assert.deepEqual(planFor(misc), { type: "input", kind: undefined, endpoint: null, fileUrl: "https://cdn/a.pcap" });
+  assert.deepEqual(planFor(misc), { type: "input", kind: undefined, endpoint: null, fileUrl: "https://cdn/a.pcap", webUrl: null });
 
   const cryptoText = q({ category: "crypto", description: "n=... e=65537" });
-  assert.deepEqual(planFor(cryptoText), { type: "input", kind: "crypto", endpoint: null, fileUrl: null });
+  assert.deepEqual(planFor(cryptoText), { type: "input", kind: "crypto", endpoint: null, fileUrl: null, webUrl: null });
 
   const empty = q({ description: "", file_url: null, connection: null });
   assert.equal(planFor(empty).type, "blocked");
+});
+
+test("planFor: web with source attachment becomes an input plan carrying the live url", () => {
+  const mixed = q({
+    category: "web",
+    interactive: true,
+    file_url: "https://cdn/web-src.zip",
+    connection: { docker_url: "w:8080" },
+  });
+  assert.deepEqual(planFor(mixed), {
+    type: "input",
+    kind: undefined,
+    endpoint: null,
+    fileUrl: "https://cdn/web-src.zip",
+    webUrl: "http://w:8080/",
+  });
+  // url only: still a pure web campaign
+  const pureWeb = q({ category: "web", interactive: true, connection: { docker_url: "w:80" } });
+  assert.deepEqual(planFor(pureWeb), { type: "url", url: "http://w/" });
+  // file only: attachment input without a live url
+  const fileOnly = q({ category: "web", file_url: "https://cdn/web-src.zip" });
+  assert.deepEqual(planFor(fileOnly), {
+    type: "input",
+    kind: undefined,
+    endpoint: null,
+    fileUrl: "https://cdn/web-src.zip",
+    webUrl: null,
+  });
+  // non-web http container paired with an attachment keeps the url too
+  const miscHttp = q({ category: "misc", file_url: "https://cdn/a.bin", connection: { docker_url: "svc:9000" } });
+  assert.deepEqual(planFor(miscHttp), {
+    type: "input",
+    kind: undefined,
+    endpoint: null,
+    fileUrl: "https://cdn/a.bin",
+    webUrl: "http://svc:9000/",
+  });
 });
 
 test("rankQuestions: easy layers first, score asc, solved_number desc", () => {
@@ -135,4 +173,10 @@ test("connectionKey + scopeFor track endpoint moves", () => {
   assert.deepEqual(scopeFor(a), { assets: ["1.1.1.1:1000"], entries: ["tcp://1.1.1.1:1000"] });
   const web = q({ category: "web", connection: { docker_url: "w:80" } });
   assert.deepEqual(scopeFor(web), { assets: ["w", "http://w/"], entries: ["http://w/"] });
+  // a connection that carries both an http app and a tcp service reports both
+  const mixed = q({ category: "web", connection: { docker_url: "w:80", docker_ip: "1.2.3.4", docker_port: "9999" } });
+  assert.deepEqual(scopeFor(mixed), {
+    assets: ["w", "http://w/", "1.2.3.4:9999"],
+    entries: ["http://w/", "tcp://1.2.3.4:9999"],
+  });
 });

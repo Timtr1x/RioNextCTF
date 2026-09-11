@@ -17,6 +17,7 @@ interface WzState {
   label: string;
   kind: string;
   endpoint: string;
+  webUrl: string;
   hint: string;
   specText: string;
 }
@@ -30,6 +31,7 @@ const INIT: WzState = {
   label: "",
   kind: "auto",
   endpoint: "",
+  webUrl: "",
   hint: "",
   specText: "",
 };
@@ -63,9 +65,10 @@ export function Wizard({ onClose, initialSource }: { onClose: () => void; initia
         else if (triage?.campaign_id) body.id = triage.campaign_id;
         if (wz.kind !== "auto") body.kind = wz.kind;
         if (wz.endpoint.trim()) body.endpoint = wz.endpoint.trim();
+        if (wz.webUrl.trim()) body.web_url = wz.webUrl.trim();
         if (wz.hint.trim()) body.hint = wz.hint.trim();
         body.label = wz.label;
-        cli = `rionext run --input ${wz.label || "附件"}${wz.kind !== "auto" ? ` --kind ${wz.kind}` : ""}${wz.endpoint ? ` --endpoint ${wz.endpoint}` : ""}${wz.hint ? ` --hint "${wz.hint}"` : ""}`;
+        cli = `rionext run --input ${wz.label || "附件"}${wz.kind !== "auto" ? ` --kind ${wz.kind}` : ""}${wz.endpoint ? ` --endpoint ${wz.endpoint}` : ""}${wz.webUrl ? ` --web-url ${wz.webUrl}` : ""}${wz.hint ? ` --hint "${wz.hint}"` : ""}`;
       } else {
         body.spec = JSON.parse(wz.specText);
         cli = "rionext run --spec <json>";
@@ -199,7 +202,7 @@ function InputForm({
   const fileRef = useRef<HTMLInputElement>(null);
   const seqRef = useRef(0);
 
-  const doTriage = async (uploadId: string, label: string, kind: string, endpoint: string, hint: string): Promise<void> => {
+  const doTriage = async (uploadId: string, label: string, kind: string, endpoint: string, webUrl: string, hint: string): Promise<void> => {
     const seq = ++seqRef.current;
     setTriaging(true);
     try {
@@ -208,6 +211,7 @@ function InputForm({
         label,
         ...(kind !== "auto" ? { kind } : {}),
         ...(endpoint.trim() ? { endpoint: endpoint.trim() } : {}),
+        ...(webUrl.trim() ? { web_url: webUrl.trim() } : {}),
         ...(hint.trim() ? { hint: hint.trim() } : {}),
       });
       if (seq === seqRef.current) setTriage(res);
@@ -236,7 +240,7 @@ function InputForm({
       }
       const next = { ...wz, files, uploadId, label };
       setWz(next);
-      await doTriage(uploadId!, label, next.kind, next.endpoint, next.hint);
+      await doTriage(uploadId!, label, next.kind, next.endpoint, next.webUrl, next.hint);
     } catch (err) {
       toastError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -255,7 +259,7 @@ function InputForm({
       const res = await api.fetchUpload({ url, label });
       const next = { ...wz, files: [], uploadId: res.upload_id, label };
       setWz(next);
-      await doTriage(res.upload_id, label, next.kind, next.endpoint, next.hint);
+      await doTriage(res.upload_id, label, next.kind, next.endpoint, next.webUrl, next.hint);
     } catch (err) {
       toastError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -307,7 +311,7 @@ function InputForm({
           onChange={(e) => {
             const next = { ...wz, kind: e.target.value };
             setWz(next);
-            if (next.uploadId) void doTriage(next.uploadId, next.label, next.kind, next.endpoint, next.hint);
+            if (next.uploadId) void doTriage(next.uploadId, next.label, next.kind, next.endpoint, next.webUrl, next.hint);
           }}
         >
           {["auto", "reverse", "pwn", "misc", "crypto", "generic"].map((k) => (
@@ -320,8 +324,17 @@ function InputForm({
         <input
           value={wz.endpoint}
           onChange={(e) => setWz({ ...wz, endpoint: e.target.value })}
-          onBlur={() => wz.uploadId && void doTriage(wz.uploadId, wz.label, wz.kind, wz.endpoint, wz.hint)}
+          onBlur={() => wz.uploadId && void doTriage(wz.uploadId, wz.label, wz.kind, wz.endpoint, wz.webUrl, wz.hint)}
           placeholder="tcp://10.20.30.40:9999（可空）"
+        />
+      </div>
+      <div className="frow">
+        <label>--web-url</label>
+        <input
+          value={wz.webUrl}
+          onChange={(e) => setWz({ ...wz, webUrl: e.target.value })}
+          onBlur={() => wz.uploadId && void doTriage(wz.uploadId, wz.label, wz.kind, wz.endpoint, wz.webUrl, wz.hint)}
+          placeholder="http://靶机:8080/（web 题给源码时用，可空）"
         />
       </div>
       <div className="frow">
@@ -329,7 +342,7 @@ function InputForm({
         <input
           value={wz.hint}
           onChange={(e) => setWz({ ...wz, hint: e.target.value })}
-          onBlur={() => wz.uploadId && void doTriage(wz.uploadId, wz.label, wz.kind, wz.endpoint, wz.hint)}
+          onBlur={() => wz.uploadId && void doTriage(wz.uploadId, wz.label, wz.kind, wz.endpoint, wz.webUrl, wz.hint)}
           placeholder="登录逻辑在 native lib（可空）"
         />
       </div>
@@ -468,7 +481,7 @@ function Step3({ wz, solver, triage }: { wz: WzState; solver: string; triage: Tr
     if (wz.source === "url") return { entry: `--url ${wz.url}`, id: wz.id || "按 host 生成" };
     if (wz.source === "input")
       return {
-        entry: `--input ${wz.label}（${wz.files.length} 个文件）${wz.kind !== "auto" ? ` --kind ${wz.kind}` : ""}${wz.endpoint ? ` --endpoint ${wz.endpoint}` : ""}${wz.hint ? ` --hint "${wz.hint}"` : ""}`,
+        entry: `--input ${wz.label}（${wz.files.length} 个文件）${wz.kind !== "auto" ? ` --kind ${wz.kind}` : ""}${wz.endpoint ? ` --endpoint ${wz.endpoint}` : ""}${wz.webUrl ? ` --web-url ${wz.webUrl}` : ""}${wz.hint ? ` --hint "${wz.hint}"` : ""}`,
         id: triage?.campaign_id ?? wz.id,
       };
     let id = "?";

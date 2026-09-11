@@ -6,7 +6,7 @@ import { applyKindOverride, isChallengeKind, parseTcpEndpoint, type ChallengeKin
 import { classifyChallenge } from "../domain/challenge-triage.ts";
 import { invalidInput } from "../domain/errors.ts";
 import { originalRoot, stageInput } from "../domain/input-manifest.ts";
-import { buildInputFlagSpec, buildKaliFlagSpec, campaignIdForInput, looksLikeHttpUrl } from "../domain/quick-spec.ts";
+import { buildInputFlagSpec, buildKaliFlagSpec, campaignIdForInput, looksLikeHttpUrl, parseTargetUrl } from "../domain/quick-spec.ts";
 import type { CampaignSpec } from "../domain/types.ts";
 import { ProviderCatalog } from "../provider/catalog.ts";
 import { resolveSlot } from "../provider/router.ts";
@@ -22,8 +22,8 @@ export interface SeedStepPlan {
 export type RunSource =
   | { kind: "url"; url: string }
   | { kind: "spec"; path: string }
-  | { kind: "input"; path: string; challengeKind?: ChallengeKind; endpoint?: TcpEndpoint; hint?: string }
-  | { kind: "input-url"; url: string; challengeKind?: ChallengeKind; endpoint?: TcpEndpoint; hint?: string };
+  | { kind: "input"; path: string; challengeKind?: ChallengeKind; endpoint?: TcpEndpoint; webUrl?: string; hint?: string }
+  | { kind: "input-url"; url: string; challengeKind?: ChallengeKind; endpoint?: TcpEndpoint; webUrl?: string; hint?: string };
 
 export interface LoadedRun {
   spec: unknown;
@@ -40,6 +40,7 @@ export function pickRunSource(flags: Record<string, string | boolean>, positiona
   const inputUrl = flagString(flags, "input-url");
   const kindRaw = flagString(flags, "kind");
   const endpointRaw = flagString(flags, "endpoint");
+  const webUrlRaw = flagString(flags, "web-url");
   const hint = flagString(flags, "hint");
 
   if (flags.input === true || inputPath === "true") {
@@ -69,12 +70,15 @@ export function pickRunSource(flags: Record<string, string | boolean>, positiona
     }
     let endpoint: TcpEndpoint | undefined;
     if (endpointRaw) endpoint = parseTcpEndpoint(endpointRaw);
-    if (inputPath) return { kind: "input", path: inputPath, challengeKind, endpoint, hint };
-    return { kind: "input-url", url: inputUrl!, challengeKind, endpoint, hint };
+    let webUrl: string | undefined;
+    if (webUrlRaw) webUrl = parseTargetUrl(webUrlRaw).toString();
+    if (inputPath) return { kind: "input", path: inputPath, challengeKind, endpoint, webUrl, hint };
+    return { kind: "input-url", url: inputUrl!, challengeKind, endpoint, webUrl, hint };
   }
 
   if (kindRaw) throw invalidInput("kind_without_input", "--kind only applies to --input/--input-url runs");
   if (endpointRaw) throw invalidInput("endpoint_without_input", "--endpoint only applies to --input/--input-url runs");
+  if (webUrlRaw) throw invalidInput("web_url_without_input", "--web-url only applies to --input/--input-url runs");
   if (hint) throw invalidInput("hint_without_input", "--hint only applies to --input/--input-url runs");
 
   if (url) {
@@ -144,15 +148,18 @@ export function specFromInput(
       sha256: manifest.sha256,
     },
     endpoint: source.endpoint,
+    web_url: source.webUrl,
     container_root: opts?.containerRoot,
   });
   const overlayText = triage.overlay ? `/${triage.overlay}` : "";
   const endpointText = source.endpoint ? ` 远程服务 tcp://${source.endpoint.host}:${source.endpoint.port}（容器内可达，pwntools remote() 或 nc）。` : "";
+  const webText = source.webUrl ? ` 本题还有 live web 靶机 ${source.webUrl}（容器内可达），附件是它的源码/配套材料：先读源码找漏洞点，再打靶机拿 flag。` : "";
   const question =
     `挑战附件已就位：${root}/input/original（${manifest.entries.length} 个文件，SHA-256 清单见 ${root}/input/manifest.json）。` +
     `题型判定 ${triage.kind}${overlayText}（置信度 ${triage.confidence}）。` +
     `按 user_payload.skill_pack 的流程分析附件；input/original 只读，中间产物写 ${root}/work，证据写 ${root}/artifacts。` +
     endpointText +
+    webText +
     `恢复 flag 后调用 submit_fact，fact_key=flag_recovered，proposition 为 flag 原文。`;
   const seed: SeedStepPlan = {
     question,
@@ -187,6 +194,7 @@ export async function loadCampaignSpec(flags: Record<string, string | boolean>, 
       path: dir,
       challengeKind: source.challengeKind,
       endpoint: source.endpoint,
+      webUrl: source.webUrl,
       hint: source.hint,
     };
     return specFromInput(staged, dataDir, flagString(flags, "id"));

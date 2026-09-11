@@ -72,20 +72,27 @@ export type LaunchPlan =
       kind?: "reverse" | "pwn" | "crypto";
       endpoint: TcpEndpoint | null;
       fileUrl: string | null;
+      /** Live web app paired with the attachment (web questions that hand out
+       *  source). Null for attachment-only and pure-tcp plans. */
+      webUrl: string | null;
     }
   | { type: "blocked"; reason: string };
 
 export function planFor(q: ContestQuestion): LaunchPlan {
   const cat = kindForCategory(q.category);
+  const fileUrl = q.file_url && q.file_url.trim() ? q.file_url.trim() : null;
   if (cat === "web") {
     const url = webUrlFor(q.connection);
-    if (url) return { type: "url", url };
+    // Web with only a container stays a pure web campaign; web that also hands
+    // out source becomes an input campaign whose spec carries the live URL.
+    if (url && !fileUrl) return { type: "url", url };
+    if (url && fileUrl) return { type: "input", kind: undefined, endpoint: null, fileUrl, webUrl: url };
   }
   const endpoint = endpointFor(q.connection);
-  const fileUrl = q.file_url && q.file_url.trim() ? q.file_url.trim() : null;
+  const webUrl = cat === "web" ? null : webUrlFor(q.connection);
   const kind = cat === "pwn" || cat === "reverse" || cat === "crypto" ? cat : undefined;
-  if (endpoint || fileUrl) return { type: "input", kind, endpoint, fileUrl };
-  if (q.description.trim()) return { type: "input", kind, endpoint: null, fileUrl: null };
+  if (endpoint || fileUrl) return { type: "input", kind, endpoint, fileUrl, webUrl };
+  if (q.description.trim()) return { type: "input", kind, endpoint: null, fileUrl: null, webUrl };
   return { type: "blocked", reason: "no url, attachment, endpoint or description" };
 }
 
@@ -145,16 +152,21 @@ export function connectionKey(q: ContestQuestion): string {
   return c ? `${c.docker_url ?? ""}|${c.docker_ip ?? ""}|${c.docker_port ?? ""}` : "";
 }
 
-/** Scope assets/entries matching the question's current connection. */
+/** Scope assets/entries matching the question's current connection. Mixed
+ *  questions (live app + attachment, or tcp service + web panel) report every
+ *  entrypoint so a mid-contest endpoint move never drops one. */
 export function scopeFor(q: ContestQuestion): { assets: string[]; entries: string[] } {
-  if (kindForCategory(q.category) === "web") {
-    const url = webUrlFor(q.connection);
-    if (url) {
-      const u = new URL(url);
-      return { assets: [u.hostname, url], entries: [url] };
-    }
+  const assets: string[] = [];
+  const entries: string[] = [];
+  const url = webUrlFor(q.connection);
+  if (url) {
+    assets.push(new URL(url).hostname, url);
+    entries.push(url);
   }
   const ep = endpointFor(q.connection);
-  if (ep) return { assets: [`${ep.host}:${ep.port}`], entries: [`tcp://${ep.host}:${ep.port}`] };
-  return { assets: [], entries: [] };
+  if (ep) {
+    assets.push(`${ep.host}:${ep.port}`);
+    entries.push(`tcp://${ep.host}:${ep.port}`);
+  }
+  return { assets, entries };
 }

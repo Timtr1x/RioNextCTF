@@ -27,6 +27,7 @@ test("pickRunSource accepts --input-url and keeps it exclusive", () => {
     url: "https://x.test/files/t.zip",
     challengeKind: undefined,
     endpoint: undefined,
+    webUrl: undefined,
     hint: undefined,
   });
   const withKind = pickRunSource({ "input-url": "https://x.test/t.zip", kind: "misc" }, []);
@@ -50,6 +51,27 @@ test("pickRunSource accepts --input-url and keeps it exclusive", () => {
   assert.throws(
     () => pickRunSource({ url: "http://lab.example/", kind: "misc" }, []),
     (e: unknown) => e instanceof DomainError && e.code === "kind_without_input",
+  );
+});
+
+test("pickRunSource accepts --web-url with input runs and rejects it elsewhere", () => {
+  const withInput = pickRunSource({ input: "./src", "web-url": "http://target.example:8080/" }, []);
+  assert.equal(withInput.kind, "input");
+  if (withInput.kind === "input") assert.equal(withInput.webUrl, "http://target.example:8080/");
+  const withInputUrl = pickRunSource({ "input-url": "https://x.test/t.zip", "web-url": "http://target.example" }, []);
+  assert.equal(withInputUrl.kind, "input-url");
+  if (withInputUrl.kind === "input-url") assert.equal(withInputUrl.webUrl, "http://target.example/");
+  assert.throws(
+    () => pickRunSource({ url: "http://lab.example/", "web-url": "http://target.example/" }, []),
+    (e: unknown) => e instanceof DomainError && e.code === "web_url_without_input",
+  );
+  assert.throws(
+    () => pickRunSource({ spec: "x.json", "web-url": "http://target.example/" }, []),
+    (e: unknown) => e instanceof DomainError && e.code === "web_url_without_input",
+  );
+  assert.throws(
+    () => pickRunSource({ input: "./src", "web-url": "ftp://target.example/" }, []),
+    (e: unknown) => e instanceof DomainError && e.code === "invalid_url",
   );
 });
 
