@@ -118,6 +118,7 @@ export function registerOpsRoutes(add: Add, host: EngineHost, tasks: TaskRegistr
         max_tool_calls_per_run: cfg.max_tool_calls_per_run,
         max_transient_retries_per_invocation: cfg.max_transient_retries_per_invocation,
         lease_ttl_ms: cfg.lease_ttl_ms,
+        run_lease_ms: cfg.run_lease_ms,
         heartbeat_ms: cfg.heartbeat_ms,
         tool_preview_limit: cfg.tool_preview_limit,
         finalization: cfg.finalization,

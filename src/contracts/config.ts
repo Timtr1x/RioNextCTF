@@ -20,6 +20,10 @@ export interface RuntimeConfig {
   max_new_steps_per_decision: number;
   max_active_frontier_items: number;
   lease_ttl_ms: number;
+  /** Task-run lease: short on purpose. A live worker renews it every heartbeat_ms,
+   *  so a crashed process stops renewing and recoverStaleRuns can reclaim the run
+   *  within ~run_lease_ms instead of waiting out the controller-lock TTL. */
+  run_lease_ms: number;
   heartbeat_ms: number;
   tool_preview_limit: number;
   automatic_model_fallback: false;
@@ -38,6 +42,7 @@ export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "arti
   max_new_steps_per_decision: 8,
   max_active_frontier_items: 64,
   lease_ttl_ms: 60 * 60_000,
+  run_lease_ms: 2 * 60_000,
   heartbeat_ms: 20_000,
   tool_preview_limit: 50_000,
   automatic_model_fallback: false,

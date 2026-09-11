@@ -205,6 +205,7 @@ async function main(): Promise<void> {
     return;
   }
   if (flags["lease-ms"]) cfg.lease_ttl_ms = Number(flags["lease-ms"]);
+  if (flags["run-lease-ms"]) cfg.run_lease_ms = Number(flags["run-lease-ms"]);
   const engine = new Engine(cfg, {
     maxCycles: flags["max-cycles"] ? Number(flags["max-cycles"]) : 1000,
   });

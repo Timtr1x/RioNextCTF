@@ -548,3 +548,46 @@ test("checkpoint lookup does not return another step's note", () => {
   e.close();
 });
 
+
+test("heartbeatRun renews a live lease and cannot resurrect a reclaimed run", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rn-hb-"));
+  const e = open(dir);
+  try {
+    const spec = loadDemoSpec("hb");
+    e.createCampaign(spec);
+    const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+    // A live renewal pushes the deadline out; recoverStaleRuns leaves it alone.
+    const later = Date.now() + 120_000;
+    e.storage.heartbeatRun(run.run_id, later);
+    assert.equal(Number(e.storage.getRun(run.run_id).deadline_ms), later);
+    assert.equal(e.storage.recoverStaleRuns(spec.campaign_id), 0);
+    // Simulate a crashed worker: the deadline lapses with no renewal.
+    e.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = 0 WHERE id = ?").run(run.run_id);
+    assert.equal(e.storage.recoverStaleRuns(spec.campaign_id), 1);
+    assert.equal(e.storage.getRun(run.run_id).state, "lease_expired");
+    // A late heartbeat from the dead worker must not steal the lease back.
+    const resurrect = Date.now() + 120_000;
+    e.storage.heartbeatRun(run.run_id, resurrect);
+    assert.notEqual(Number(e.storage.getRun(run.run_id).deadline_ms), resurrect);
+    assert.equal(e.storage.getRun(run.run_id).state, "lease_expired");
+  } finally {
+    e.close();
+  }
+});
+
+test("run claims use the short run lease, not the controller-lock TTL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rn-rl-"));
+  const e = open(dir);
+  try {
+    const spec = loadDemoSpec("rl");
+    e.createCampaign(spec);
+    const before = Date.now();
+    const run = e.storage.claimDecide(spec.campaign_id, "t", e.config.run_lease_ms)!;
+    const deadline = Number(e.storage.getRun(run.run_id).deadline_ms);
+    assert.ok(deadline - before <= e.config.run_lease_ms + 1000, `deadline too far out: ${deadline - before}`);
+    assert.equal(e.config.run_lease_ms, 120_000);
+    assert.ok(e.config.run_lease_ms < e.config.lease_ttl_ms);
+  } finally {
+    e.close();
+  }
+});

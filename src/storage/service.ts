@@ -165,6 +165,17 @@ export class StorageService {
     return this.store.transaction(() => this.recoverPendingFinishesTx(campaignId));
   }
 
+  /**
+   * Renew a live run's lease. The WHERE clause refuses to touch a run that was
+   * already finished or reclaimed, so a partitioned worker cannot steal its
+   * own lease back from a controller takeover.
+   */
+  heartbeatRun(runId: string, deadlineMs: number): void {
+    this.store.db
+      .prepare("UPDATE task_runs SET deadline_ms = ?, updated_at = ? WHERE id = ? AND state IN ('claimed','running')")
+      .run(deadlineMs, nowIso(), runId);
+  }
+
   private recoverPendingFinishesTx(campaignId: string): number {
     const pending = this.store.db
       .prepare(

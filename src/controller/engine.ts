@@ -447,7 +447,7 @@ export class Engine {
   }
 
   async runDecide(campaignId: string): Promise<TaskOutcome | null> {
-    const claimed = this.storage.claimDecide(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
+    const claimed = this.storage.claimDecide(campaignId, this.config.instance_id, this.config.run_lease_ms);
     if (!claimed) return null;
     const camp = this.storage.getCampaign(campaignId);
     const lease: RunLease = {
@@ -468,7 +468,7 @@ export class Engine {
 
   async runExecuteSlot(campaignId: string): Promise<TaskOutcome | null> {
     const camp = this.storage.getCampaign(campaignId);
-    const claimed = this.storage.claimNextStep(campaignId, this.config.instance_id, camp.epoch, this.config.lease_ttl_ms);
+    const claimed = this.storage.claimNextStep(campaignId, this.config.instance_id, camp.epoch, this.config.run_lease_ms);
     if (!claimed) return null;
     const lease: RunLease = {
       run_id: claimed.run_id,
@@ -487,7 +487,7 @@ export class Engine {
   }
 
   private leaseDeadline(camp: { spec: CampaignSpec }): number {
-    const leaseEnd = Date.now() + this.config.lease_ttl_ms;
+    const leaseEnd = Date.now() + this.config.run_lease_ms;
     const campaignEnd = camp.spec.budget.deadline_ms;
     if (campaignEnd != null && campaignEnd > 0) return Math.min(leaseEnd, campaignEnd);
     return leaseEnd;
@@ -496,17 +496,33 @@ export class Engine {
   async runWorker(lease: RunLease): Promise<TaskOutcome> {
     const worker = this.factory.create(lease.mode, lease.run_id) as unknown as PiWorker;
     this.lastWorker = worker;
-    const ctx = buildContextPack(this.storage, lease, { schema_version: SCHEMA_VERSION });
-    const ctrl = new AbortController();
-    await worker.start(lease, ctx, ctrl.signal);
-    const outcome = await worker.settle();
-    this.storage.finishRun(lease.campaign_id, lease.run_id, outcome);
-    if (worker.modelGateway) this.modelSends += worker.modelGateway.modelSends;
-    if (worker.toolGateway) {
-      this.toolSends += worker.toolGateway.toolSends;
-      this.envSends += worker.toolGateway.envSends;
+    // Keep the short run lease alive while this process is actually working.
+    // If the process dies the renewals stop, and recoverStaleRuns reclaims the
+    // run within ~run_lease_ms instead of the full controller-lock TTL.
+    const camp = this.storage.getCampaign(lease.campaign_id);
+    const heartbeat = setInterval(() => {
+      try {
+        this.storage.heartbeatRun(lease.run_id, this.leaseDeadline(camp));
+      } catch {
+        // DB closing or run row gone; the settle path surfaces real errors.
+      }
+    }, this.config.heartbeat_ms);
+    heartbeat.unref();
+    try {
+      const ctx = buildContextPack(this.storage, lease, { schema_version: SCHEMA_VERSION });
+      const ctrl = new AbortController();
+      await worker.start(lease, ctx, ctrl.signal);
+      const outcome = await worker.settle();
+      this.storage.finishRun(lease.campaign_id, lease.run_id, outcome);
+      if (worker.modelGateway) this.modelSends += worker.modelGateway.modelSends;
+      if (worker.toolGateway) {
+        this.toolSends += worker.toolGateway.toolSends;
+        this.envSends += worker.toolGateway.envSends;
+      }
+      return outcome;
+    } finally {
+      clearInterval(heartbeat);
     }
-    return outcome;
   }
 
   snapshot(campaignId: string): CompletionSnapshot {
