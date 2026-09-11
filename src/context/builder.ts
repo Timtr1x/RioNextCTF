@@ -82,20 +82,39 @@ function buildSkillPack(
 }
 
 /**
- * Per-item cap for observation bodies inside the context pack. A worker that
- * dumps a whole file into one observation (tool_raw with a huge body) must
- * not brick the campaign: the pack only reads the newest 20 observations, so
- * 20 fat bodies would blow the global 400k cap on every later run, forever.
- * The full body stays in the observations table; only the pack's copy is cut.
+ * Adaptive observation-body fit for the context pack. A worker that dumps a
+ * whole file into one observation (tool_raw with a huge body) must not brick
+ * the campaign, but a fixed small cap also starves the model of context: the
+ * pack has a 400k budget, so we measure everything else first and split what
+ * is left across the newest-20 observation window (clamped to [MIN, MAX] per
+ * item). Truncated bodies point at graph_query so the worker can page the
+ * full text itself; the observations table always keeps the untruncated copy.
  */
-const OBSERVATION_BODY_CAP = 8_000;
+const PACK_HARD_LIMIT = 400_000;
+const PACK_SAFETY_MARGIN = 20_000;
+const OBS_ITEM_MIN = 2_000;
+const OBS_ITEM_MAX = 64_000;
 
-function capObservationBodies(items: unknown[]): void {
-  for (const item of items) {
+function fitObservationBodies(payload: Record<string, unknown>, items: unknown[]): void {
+  if (items.length === 0) return;
+  const bodies = items.map((item) => {
     const body = (item as { body_json?: unknown }).body_json;
-    if (typeof body === "string" && body.length > OBSERVATION_BODY_CAP) {
-      (item as { body_json: string }).body_json =
-        body.slice(0, OBSERVATION_BODY_CAP) + `...[truncated ${body.length - OBSERVATION_BODY_CAP} chars in context pack; full body in observations table]`;
+    return typeof body === "string" ? body : "";
+  });
+  const totalBodies = bodies.reduce((sum, body) => sum + body.length, 0);
+  if (totalBodies === 0) return;
+  // The serialized payload already contains the bodies; subtracting their raw
+  // lengths slightly underestimates the stripped size (JSON escaping), which
+  // makes the budget conservative.
+  const strippedLen = JSON.stringify(payload).length - totalBodies;
+  const budget = PACK_HARD_LIMIT - PACK_SAFETY_MARGIN - strippedLen;
+  const cap = Math.max(OBS_ITEM_MIN, Math.min(OBS_ITEM_MAX, Math.floor(budget / items.length)));
+  for (let i = 0; i < items.length; i++) {
+    const body = bodies[i] ?? "";
+    if (body.length > cap) {
+      (items[i] as { body_json: string }).body_json =
+        body.slice(0, cap) +
+        `...[truncated ${body.length - cap} chars in context pack; full body via graph_query(entity="observations", order="desc") with offset paging]`;
     }
   }
 }
@@ -108,7 +127,6 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   const findings = storage.graphQuery(lease.campaign_id, { entity: "findings", limit: 20 });
   const coverage = storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 });
   const observations = storage.graphQuery(lease.campaign_id, { entity: "observations", limit: 20, order: "desc" });
-  capObservationBodies(observations.items);
   const hints = storage.listHints(lease.campaign_id);
   const checkpoint = storage.latestCheckpoint(lease.campaign_id, { runId: lease.run_id, stepId: lease.step_id });
   const payload: Record<string, unknown> = {
@@ -139,8 +157,9 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
       payload.skill_pack = buildSkillPack(camp, step);
     }
   }
+  fitObservationBodies(payload, observations.items);
   const encoded = JSON.stringify(payload);
-  if (encoded.length > 400_000) {
+  if (encoded.length > PACK_HARD_LIMIT) {
     throw new Error("context_capacity: required invariant content does not fit");
   }
   const manifest: ContextManifest = {

@@ -87,9 +87,13 @@ test("giant observation bodies are capped so the context pack always fits", () =
     const graph = payload(pack).graph as { observations: Array<{ body_json: string }> };
     assert.equal(graph.observations.length, 20);
     for (const obs of graph.observations) {
-      assert.ok(obs.body_json.length < 9_000, `body not capped: ${obs.body_json.length}`);
+      // Adaptive cap: leftover budget / 20, clamped to [2k, 64k], plus marker.
+      assert.ok(obs.body_json.length < 65_000, `body not capped: ${obs.body_json.length}`);
       assert.ok(obs.body_json.includes("[truncated"), "missing truncation marker");
+      assert.ok(obs.body_json.includes("graph_query"), "marker must say how to fetch the full body");
     }
+    // The pack as a whole stays inside the 400k budget.
+    assert.ok(JSON.stringify(payload(pack)).length <= 400_000, "pack exceeds 400k budget");
     // And the full body is still intact in storage.
     const full = e.storage.list("observations", "camp_fat") as Array<{ body_json: string }>;
     assert.ok(full.every((o) => o.body_json.length > 100_000));
