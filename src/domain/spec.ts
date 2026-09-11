@@ -4,7 +4,7 @@ import { invalidInput } from "./errors.ts";
 import type { CampaignSpec, CampaignState } from "./types.ts";
 
 export const DEFAULT_MAX_CALLS = 3000;
-export const DEFAULT_MAX_TOKENS = 80_000_000;
+export const DEFAULT_MAX_TOKENS = 120_000_000;
 
 export const ALLOWED_MODELS = new Set(["scripted", "scripted-react"]);
 export const ALLOWED_PROVIDERS = new Set(["scripted"]);

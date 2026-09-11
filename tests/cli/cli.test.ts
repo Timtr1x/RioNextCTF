@@ -80,7 +80,7 @@ test("CLI help documents default-on Finalize and the off switch", () => {
   assert.match(HELP, /run --url/);
   assert.match(HELP, /provider list\|show\|add\|set\|key\|rm/);
   assert.match(HELP, /72 model turns/);
-  assert.match(HELP, /80_000_000 tokens/);
+  assert.match(HELP, /120_000_000 tokens/);
 });
 
 test("ops.md documents default-on Finalize and the off switch", () => {

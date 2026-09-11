@@ -62,7 +62,7 @@ OpenCode Go（`opencode.ai`）请求会自动带 `x-opencode-session`（战役�
 - `campaign_id`，`schema_version: 1`
 - `mode`: `goal_seeking` 或 `assessment`
 - `root_goal.statement` 和 `success_predicate_ref`（找 flag 用 `flag_recovered`）
-- `budget`：至少 `max_calls` / `max_tokens` / `max_cost_micro` 之一。省略键时默认 3000 calls、80_000_000 tokens
+- `budget`：至少 `max_calls` / `max_tokens` / `max_cost_micro` 之一。省略键时默认 3000 calls、120_000_000 tokens
 - `model_policy`、`scope.assets`、`tool_allowlist`
 
 实靶资产必须能过出口白名单。主机名和 `http://host/` 都写上。容器 iptables 按解析出的 IP 放行。
