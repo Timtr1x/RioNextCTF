@@ -19,7 +19,7 @@ test("negative budget is rejected", () => {
   assert.throws(() => validateCampaignSpec(spec), (e: unknown) => e instanceof DomainError && e.code === "negative_budget");
 });
 
-test("omitted budget caps default to 3000 calls and 30_000_000 tokens", () => {
+test("omitted budget caps default to 3000 calls and 80_000_000 tokens", () => {
   const spec = loadDemoSpec("budget-default");
   const raw = JSON.parse(JSON.stringify(spec)) as { budget: Record<string, unknown> };
   delete raw.budget.max_calls;
@@ -27,7 +27,7 @@ test("omitted budget caps default to 3000 calls and 30_000_000 tokens", () => {
   delete raw.budget.max_cost_micro;
   const parsed = validateCampaignSpec(raw);
   assert.equal(parsed.budget.max_calls, 3000);
-  assert.equal(parsed.budget.max_tokens, 30_000_000);
+  assert.equal(parsed.budget.max_tokens, 80_000_000);
 });
 
 test("omitted thinking_level defaults to high", () => {

@@ -44,5 +44,5 @@ test("buildKaliFlagSpec is a valid kali flag campaign using the solver model", (
   assert.equal(parsed.model_policy.model, "deepseek-chat");
   assert.equal(parsed.model_policy.thinking_level, "max");
   assert.equal(parsed.budget.max_calls, 3000);
-  assert.equal(parsed.budget.max_tokens, 30_000_000);
+  assert.equal(parsed.budget.max_tokens, 80_000_000);
 });

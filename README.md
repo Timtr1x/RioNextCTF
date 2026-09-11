@@ -94,13 +94,13 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 .\rionext.cmd hint [id] --text "不要用容器 php 当 unserialize 预言机"
 .\rionext.cmd facts|steps|findings|events|operations|report [id]
 .\rionext.cmd observations|invocations|coverage|goals|artifacts [id]
-.\rionext.cmd revise-budget [id] --max-calls 3000 --max-tokens 30000000
+.\rionext.cmd revise-budget [id] --max-calls 3000 --max-tokens 80000000
 .\rionext.cmd explain-step [id] --step step_...
 ```
 
 `run` / `start` 常用开关：`--progress-ms 60000`（`0` 关掉进度）、`--max-execute-turns 72`、`--max-tool-calls 144`、`--no-finalization`。
 
-默认：一段 Execute 72 轮模型、144 次工具；预算 3000 calls、30_000_000 tokens。Execute Finalize 默认开，Primary 没交 `finish_step` 时补交一次。
+默认：一段 Execute 72 轮模型、144 次工具；预算 3000 calls、80_000_000 tokens。Execute Finalize 默认开，Primary 没交 `finish_step` 时补交一次。
 
 同一战役不要再开一个 `start`。正在跑的进程用的还是旧 `dist`。
 

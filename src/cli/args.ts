@@ -149,7 +149,7 @@ Flags on run/start:
   --finalization or RIONEXT_FINALIZATION=1 still force it on
   --json
 
-Budget defaults: 3000 calls, 30_000_000 tokens, 1000 controller cycles.
+Budget defaults: 3000 calls, 80_000_000 tokens, 1000 controller cycles.
 Flag claims stop at awaiting_verify until rionext accept.
 More detail: docs/ops.md
 `;
