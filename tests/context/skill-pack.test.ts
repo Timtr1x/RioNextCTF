@@ -55,6 +55,49 @@ function seedStep(e: Engine, campaignId: string, family: string): string {
 
 const PROVIDER = { provider: "prv_test", model: "test-model" };
 
+test("giant observation bodies are capped so the context pack always fits", () => {
+  const dir = tmp();
+  const e = openEngine(dir, { silent: true, maxCycles: 1 });
+  try {
+    const spec = buildInputFlagSpec({
+      ...PROVIDER,
+      campaign_id: "camp_fat",
+      triage: { kind: "misc", confidence: "medium", evidence: [], seed_method_family: "ctf-misc" },
+      input: { source_name: "white", files: 1, total_bytes: 100, sha256: "cd".repeat(32) },
+    });
+    e.createCampaign(spec);
+    e.storage.setCampaignState("camp_fat", "active", { kind: "user", id: "t" });
+    const run = e.storage.claimDecide("camp_fat", "t")!;
+    // 20 observations with 100k bodies each: 2MB of raw bodies, 5x the global cap.
+    for (let i = 0; i < 20; i++) {
+      e.storage.recordObservation({
+        campaign_id: "camp_fat",
+        producer_id: "test",
+        submission_id: `fat-${i}`,
+        run_id: run.run_id,
+        attempt_id: run.run_id,
+        subject: "tool_raw:kali_run",
+        body: { dump: "x".repeat(100_000) },
+        artifact_refs: [],
+        conditions: {},
+        env_rev: "env-1",
+      });
+    }
+    const pack = buildContextPack(e.storage, lease("camp_fat", "execute", null));
+    const graph = payload(pack).graph as { observations: Array<{ body_json: string }> };
+    assert.equal(graph.observations.length, 20);
+    for (const obs of graph.observations) {
+      assert.ok(obs.body_json.length < 9_000, `body not capped: ${obs.body_json.length}`);
+      assert.ok(obs.body_json.includes("[truncated"), "missing truncation marker");
+    }
+    // And the full body is still intact in storage.
+    const full = e.storage.list("observations", "camp_fat") as Array<{ body_json: string }>;
+    assert.ok(full.every((o) => o.body_json.length > 100_000));
+  } finally {
+    e.close();
+  }
+});
+
 test("execute on an input campaign gets the family skill; web gets null", () => {
   const dir = tmp();
   const e = openEngine(dir, { silent: true, maxCycles: 1 });

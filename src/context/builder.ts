@@ -81,6 +81,25 @@ function buildSkillPack(
   return lines.join("\n");
 }
 
+/**
+ * Per-item cap for observation bodies inside the context pack. A worker that
+ * dumps a whole file into one observation (tool_raw with a huge body) must
+ * not brick the campaign: the pack only reads the newest 20 observations, so
+ * 20 fat bodies would blow the global 400k cap on every later run, forever.
+ * The full body stays in the observations table; only the pack's copy is cut.
+ */
+const OBSERVATION_BODY_CAP = 8_000;
+
+function capObservationBodies(items: unknown[]): void {
+  for (const item of items) {
+    const body = (item as { body_json?: unknown }).body_json;
+    if (typeof body === "string" && body.length > OBSERVATION_BODY_CAP) {
+      (item as { body_json: string }).body_json =
+        body.slice(0, OBSERVATION_BODY_CAP) + `...[truncated ${body.length - OBSERVATION_BODY_CAP} chars in context pack; full body in observations table]`;
+    }
+  }
+}
+
 export function buildContextPack(storage: StorageService, lease: RunLease, extra: Record<string, unknown> = {}): ContextPack {
   const camp = storage.getCampaign(lease.campaign_id);
   const facts = storage.graphQuery(lease.campaign_id, { entity: "facts", limit: 30 });
@@ -89,6 +108,7 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   const findings = storage.graphQuery(lease.campaign_id, { entity: "findings", limit: 20 });
   const coverage = storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 });
   const observations = storage.graphQuery(lease.campaign_id, { entity: "observations", limit: 20, order: "desc" });
+  capObservationBodies(observations.items);
   const hints = storage.listHints(lease.campaign_id);
   const checkpoint = storage.latestCheckpoint(lease.campaign_id, { runId: lease.run_id, stepId: lease.step_id });
   const payload: Record<string, unknown> = {
