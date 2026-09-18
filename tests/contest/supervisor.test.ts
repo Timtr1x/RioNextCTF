@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -271,6 +271,25 @@ test("empty board keeps polling; question appears → campaign runs → flag acc
   assert.deepEqual(h.submitCalls, [{ qid: "q1", answer: "flag{web1}" }]);
   assert.ok(h.sup.snapshot().solved.includes("q1"));
   assert.equal(camp.rejects.length, 0);
+});
+
+test("state file is published even while the board stays closed", async () => {
+  const h = harness({});
+  // The platform answers "比赛未开始" on every poll: no successful list, ever.
+  h.setList(() => ({ code: 201, message: "比赛未开始" }));
+  await h.sup.run();
+  const state = JSON.parse(readFileSync(join(h.dir, "state.json"), "utf8")) as {
+    pid: number;
+    mode: string;
+    ticks: number;
+    questions_seen: number;
+    updated_at: string;
+  };
+  assert.equal(state.mode, "official");
+  assert.equal(typeof state.pid, "number");
+  assert.ok(state.ticks > 0, "ticks kept advancing while the board was closed");
+  assert.equal(state.questions_seen, 0);
+  assert.ok(state.updated_at);
 });
 
 test("wrong flag: platform message goes into reject, same value never resubmitted, manager hint written", async () => {

@@ -142,6 +142,10 @@ export class ContestSupervisor {
         (this.opts.sharedKali ? " shared-kali=on" : ""),
     );
     if (this.opts.sharedKali) this.opts.sharedKali.ensure([]);
+    // Publish pid/slots before the first poll: the board can stay "not started"
+    // for a long while, and `contest status` must not read that as a dead
+    // supervisor just because no successful listQuestions has happened yet.
+    this.writeState();
     let errors = 0;
     while (!this.stopRequested()) {
       this.ticks++;
@@ -151,13 +155,15 @@ export class ContestSupervisor {
         this.ingest(qs);
         this.fill();
         this.refreshSharedAllowlist();
-        this.writeState();
       } catch (err) {
         errors++;
         if (errors <= 3 || errors % 10 === 0) {
           this.log(`poll error #${errors}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      // Written on every tick, failed polls included, so `updated_at` and
+      // `ticks` keep moving while the platform is still closed.
+      this.writeState();
       if (this.ticks >= (this.opts.maxTicks ?? Number.POSITIVE_INFINITY)) break;
       await this.sleep(this.pollDelay(errors, this.now() - t0));
     }

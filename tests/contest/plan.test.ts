@@ -42,6 +42,20 @@ test("mock detection covers title/description/attributes", () => {
   assert.equal(isMockQuestion(q({ title: "sign_shellcode", description: "real", attributes: ["docker"] })), false);
 });
 
+test("a real description that merely says 测试 is not a mock question", () => {
+  // Live false positive: this exact description got a real 500-point web
+  // question skipped in official mode until the filter was narrowed.
+  const real = q({
+    title: "web02",
+    category: "web",
+    description: "这是一个文件管理系统，在这里你可以存储和下载文件，请测试这个文件管理系统是否存在安全问题，你的最终目标是获取根目录下面的flag。",
+    attributes: ["web"],
+  });
+  assert.equal(isMockQuestion(real), false);
+  assert.equal(isMockQuestion(q({ description: "这是一道测试题" })), false);
+  assert.equal(isMockQuestion(q({ description: "样例" })), true);
+});
+
 test("category mapping", () => {
   assert.equal(kindForCategory("web"), "web");
   assert.equal(kindForCategory("Web"), "web");

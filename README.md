@@ -120,6 +120,75 @@ token 只从 `--token-file` 或 `RIONEXT_CONTEST_TOKEN` 环境变量读，不进
 
 `--mode test` 照收 mock 题和测试题，用来开赛前把全链路演练一遍。`--mode official` 过滤它们，只打真题。这个参数必须显式给，没有默认值，省得到时候手忙脚乱选错。
 
+### 赛前设置（从零到开跑）
+
+按这个顺序走一遍，前两步只做一次，之后每次比赛从第 4 步开始。
+
+**1. 确认 Kali 镜像在**
+
+比赛模式不会自己建镜像，先查：
+
+```
+.\rionext.cmd kali status          # 看 rolling / master 两个 tag 在不在
+.\rionext.cmd kali build           # 缺哪个建哪个，要几分钟到十几分钟
+.\rionext.cmd kali protect         # 起 rionext-master-keep 守护容器，防 docker prune 误删
+```
+
+**2. 配好模型（solver 槽）**
+
+督导自己不调模型（选题排序是写死的），但每个战役和可选的 manager 诊断都走 solver 槽（空槽自动回落 solver）。换 key 和换模型都在这：
+
+```
+.\rionext.cmd providers list                          # 看已有 provider 和 model，记下 prv_ / mdl_ 开头的 id
+.\rionext.cmd providers key --provider prv_xxx --api-key sk-新key     # 换 key（key 只写进 .rionext/provider-secrets.json，CLI 不回显）
+.\rionext.cmd providers model add --provider prv_xxx --name deepseek-v4.1-flash --context 1000000 --max-output 51200
+.\rionext.cmd providers test --provider prv_xxx --model deepseek-v4.1-flash   # 必须测通再往下走
+.\rionext.cmd providers slots --solver mdl_xxx --visual mdl_xxx      # 求解和视觉都指过去；--visual 可省
+```
+
+这套配置的写法：provider 用 OpenAI Chat Completions 协议，base URL 要写全 `.../v1/chat/completions`（网关原样使用，不会自动拼路径），model 按其真实上下文填 `--context`（1M 就填 1000000），solver 和 visual 都指向同一个模型。换供应商只要照第 2 步重来一遍，密钥只进 `.rionext/provider-secrets.json`。
+
+**3. 放比赛 token**
+
+token 只从文件或环境变量读。文件放 `.rionext/` 下面（这个目录在 .gitignore 里，不会误提交）：
+
+```
+notepad .rionext\contest-token.txt        # 只放一行 token，别有别的字符
+```
+
+或者临时用环境变量：`$env:RIONEXT_CONTEST_TOKEN="..."`。
+
+**4. 先演练一遍（--mode test）**
+
+用测试模式把全链路跑通——刷题单、建战役、交 flag、判错续跑都试到：
+
+```
+.\rionext.cmd contest run --mode test --token-file .\.rionext\contest-token.txt --slots 4
+```
+
+另开一个终端盯状态，看每个槽位在打哪题、交没交 flag：
+
+```
+.\rionext.cmd contest status
+```
+
+演练完停掉（这个命令会停督导、取消全部战役、杀共享容器）：
+
+```
+.\rionext.cmd contest stop
+```
+
+**5. 正式开跑（--mode official）**
+
+跟第 4 步同一条命令，只把 `test` 换成 `official`。开跑后不要再执行一次 `run`——那会起第二个督导。中途要停还是 `contest stop`。
+
+**6. 比赛中的常用操作**
+
+```
+.\rionext.cmd contest status                                  # 整体进度和每个槽位状态
+.\rionext.cmd contest reset <question_id> --token-file .\.rionext\contest-token.txt   # 单题卡死时重置它的靶机
+```
+
 ### 督导怎么干活
 
 开赛头几秒题单一般是空的，平台有时还会先挂几道 mock 题。督导前 60 秒每 3 秒刷一次题单，之后降到 15 秒一次，刷到题就开打。平台返回出错时按指数退避，最长 30 秒。

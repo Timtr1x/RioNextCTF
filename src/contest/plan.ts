@@ -13,10 +13,20 @@ import type { ContestConnection, ContestQuestion } from "./api.ts";
 export type ContestMode = "test" | "official";
 
 const MOCK_RE = /测试|test|mock|sample|样例|练习/i;
+/** A whole description that is nothing but a mock marker, e.g. "test" or "样例". */
+const MOCK_DESCRIPTION_RE = /^\s*(?:测试|test|mock|sample|样例|练习)[\s_\-—:：]*$/i;
 
+/**
+ * Mock questions are labelled in the title or attributes. Descriptions are
+ * prose and routinely use 测试/test as an ordinary verb — a real question here
+ * read "请测试这个文件管理系统是否存在安全问题" — so a description only counts
+ * when the whole string is a mock marker. Treating a real question as mock
+ * silently forfeits its points, which is the expensive mistake.
+ */
 export function isMockQuestion(q: ContestQuestion): boolean {
-  if (MOCK_RE.test(q.title) || MOCK_RE.test(q.description)) return true;
-  return q.attributes.some((a) => MOCK_RE.test(a));
+  if (MOCK_RE.test(q.title)) return true;
+  if (q.attributes.some((a) => MOCK_RE.test(a))) return true;
+  return MOCK_DESCRIPTION_RE.test(q.description);
 }
 
 export type ContestKind = "web" | "reverse" | "pwn" | "misc" | "crypto" | "generic";
