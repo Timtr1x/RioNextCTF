@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
   finish_payload_json TEXT,
   finish_submitted_at TEXT,
   primary_stop_trigger TEXT,
+  last_error TEXT,
   finalize_attempted INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,

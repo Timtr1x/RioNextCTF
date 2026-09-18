@@ -300,7 +300,7 @@ test("F23 repeat recovery does not duplicate events or step revision", () => {
   e.close();
 });
 
-test("F24 v2 database opens at schema 4 with rows intact", () => {
+test("F24 v2 database opens at schema 5 with rows intact", () => {
   const dir = mkdtempSync(join(tmpdir(), "rn-f24-"));
   const path = join(dir, "rionext.sqlite");
   mkdirSync(dir, { recursive: true });
@@ -357,18 +357,20 @@ test("F24 v2 database opens at schema 4 with rows intact", () => {
   ).run(Date.now() + 60_000, new Date().toISOString(), new Date().toISOString());
   db.close();
   const store = new Store(path);
-  assert.equal(store.schemaVersion(), 4);
+  assert.equal(store.schemaVersion(), 5);
   const camp = store.db.prepare("SELECT id, state FROM campaigns WHERE id = ?").get("camp_f24") as { id: string; state: string };
   assert.equal(camp.id, "camp_f24");
   assert.equal(camp.state, "created");
-  const run = store.db.prepare("SELECT id, finish_payload_json, finalize_attempted FROM task_runs WHERE id = ?").get("run_f24") as {
+  const run = store.db.prepare("SELECT id, finish_payload_json, finalize_attempted, last_error FROM task_runs WHERE id = ?").get("run_f24") as {
     id: string;
     finish_payload_json: string | null;
     finalize_attempted: number;
+    last_error: string | null;
   };
   assert.equal(run.id, "run_f24");
   assert.equal(run.finish_payload_json, null);
   assert.equal(Number(run.finalize_attempted), 0);
+  assert.equal(run.last_error, null, "v5 adds the run failure-detail column");
   store.close();
 });
 

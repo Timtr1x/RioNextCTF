@@ -87,7 +87,14 @@ async function throughGateway(
   e: Engine,
   lease: RunLease,
   fetchFn: FetchFn,
-  extra?: { maxRetries?: number; timeoutMs?: number; signal?: AbortSignal; providerId?: string; catalog?: ProviderCatalog },
+  extra?: {
+    maxRetries?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    providerId?: string;
+    catalog?: ProviderCatalog;
+    retryDelayMs?: (n: number) => number;
+  },
 ) {
   const { catalog, providerId } = extra?.catalog
     ? { catalog: extra.catalog, providerId: extra.providerId! }
@@ -99,6 +106,8 @@ async function throughGateway(
     fetchFn,
     maxRetries: extra?.maxRetries ?? 0,
     timeoutMs: extra?.timeoutMs ?? 200,
+    // Tests never wait out a real backoff unless they ask for one.
+    retryDelayMs: extra?.retryDelayMs ?? (() => 0),
   });
   const gw = new ModelGateway(e.storage, e.budget, new InvocationBook(e.storage), stream, lease, "fake-model", providerId);
   const s = await Promise.resolve(gw.stream(SCRIPTED_MODEL, ctx(), { signal: extra?.signal, timeoutMs: extra?.timeoutMs }));
@@ -188,6 +197,67 @@ test("I14 catalogued provider retry cap through ModelGateway", async () => {
   assert.equal(msg.stopReason, "error");
   assert.equal(stats.attempts, 3);
   assert.equal(fetches, 3);
+  assert.equal(stats.lastError, "http_503");
+  e.close();
+});
+
+test("I14 transient 500s are retried and a later success wins", async () => {
+  const dir = tmp();
+  const e = boot(dir, "i14ok");
+  const lease = leaseFor(e, "i14ok");
+  let fetches = 0;
+  const flaky: FetchFn = async () => {
+    fetches += 1;
+    if (fetches <= 2) return new Response("upstream hiccup", { status: 500 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "recovered" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const { msg, stats } = await throughGateway(e, lease, flaky, { maxRetries: 2 });
+  assert.equal(msg.stopReason, "stop");
+  assert.equal(fetches, 3, "two failures then one success");
+  assert.equal(stats.attempts, 3);
+  assert.equal(stats.lastError, null, "a recovered stream records no failure");
+  e.close();
+});
+
+test("I14 the retry backoff is honoured between attempts", async () => {
+  const dir = tmp();
+  const e = boot(dir, "i14bo");
+  const lease = leaseFor(e, "i14bo");
+  const delays: number[] = [];
+  const { stats } = await throughGateway(e, lease, async () => new Response("down", { status: 429 }), {
+    maxRetries: 2,
+    retryDelayMs: (n) => {
+      delays.push(n);
+      return 0;
+    },
+  });
+  assert.equal(stats.attempts, 3);
+  assert.deepEqual(delays, [1, 2], "backoff runs before attempt 2 and 3");
+  assert.equal(stats.lastError, "http_429");
+  e.close();
+});
+
+test("I14 a settled 4xx answer is not retried", async () => {
+  const dir = tmp();
+  const e = boot(dir, "i14f4");
+  const lease = leaseFor(e, "i14f4");
+  let fetches = 0;
+  const { msg, stats } = await throughGateway(
+    e,
+    lease,
+    async () => {
+      fetches += 1;
+      return new Response("bad request", { status: 400 });
+    },
+    { maxRetries: 2 },
+  );
+  assert.equal(msg.stopReason, "error");
+  assert.equal(fetches, 1, "400 is a verdict, not a hiccup");
+  assert.equal(stats.attempts, 1);
+  assert.equal(stats.lastError, "http_400");
   e.close();
 });
 

@@ -1642,3 +1642,78 @@ test("repeating deferred + next_action stops at MAX_STEP_ATTEMPTS", async () => 
 });
 
 
+
+test("F38 a provider failure parks the step retryable instead of sealing it", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "error", message: "upstream 500" }) });
+  const spec = loadDemoSpec("f38");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f38 step", "f38-fp");
+  const first = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(first);
+  assert.equal(first.reason, "protocol_error");
+  const parked = e.storage.list("steps", spec.campaign_id)[0]!;
+  assert.equal(parked.status, "deferred");
+  assert.equal(parked.reopen_rule_json, JSON.stringify({ kind: "always" }), "a framework park must not seal the step");
+  // The door stays open: recompute re-readies it and a second attempt happens.
+  e.storage.recomputeStepReadiness(spec.campaign_id);
+  const second = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(second, "the step is claimable again after a transient park");
+  assert.equal(Number(e.storage.list("steps", spec.campaign_id)[0]!.attempt_count), 2);
+  e.close();
+});
+
+test("F39 a frontier emptied by provider errors is requeued instead of idling", async () => {
+  let e: Engine;
+  const spec = loadDemoSpec("f39");
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      const ids = e.storage.list("observations", spec.campaign_id).map((o) => String(o.id));
+      return {
+        type: "tool_calls",
+        calls: [{ name: "finish_step", arguments: { disposition: "resolved", summary: "requeued and finished", evidence_refs: ids } }],
+      };
+    }
+    if (!toolResultNames(ctx.messages).includes("submit_observation")) {
+      return {
+        type: "tool_calls",
+        calls: [{ name: "submit_observation", arguments: { subject: "f39", body: { n: 1 } } }],
+      };
+    }
+    return { type: "text", text: "stopping without finish" };
+  };
+  e = engine(dir(), { chooseExecute });
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f39 step", "f39-fp");
+  e.storage.setCampaignState(spec.campaign_id, "active", { kind: "user", id: "t" });
+  const stepId = String(e.storage.list("steps", spec.campaign_id)[0]!.id);
+  // Simulate a step parked by a pre-fix provider failure: deferred, sealed, dead.
+  e.storage.store.db
+    .prepare("UPDATE steps SET status = 'deferred', last_failure = 'primary_stop:model_error', reopen_rule_json = ? WHERE id = ?")
+    .run(JSON.stringify({ kind: "never" }), stepId);
+  await e.runLoop(spec.campaign_id);
+  const runs = e.storage.store.db
+    .prepare("SELECT COUNT(*) AS c FROM task_runs WHERE step_id = ? AND mode = 'execute'")
+    .get(stepId) as { c: number };
+  assert.ok(Number(runs.c) >= 1, "the campaign ran the requeued step instead of idling out");
+  const step = e.storage.store.db.prepare("SELECT status FROM steps WHERE id = ?").get(stepId) as { status: string };
+  assert.equal(step.status, "resolved");
+  e.close();
+});
+
+test("F40 the provider failure reason is persisted on the run and its event", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "error", message: "upstream 500" }) });
+  const spec = loadDemoSpec("f40");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f40 step", "f40-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  const run = e.storage.getRun(outcome.run_id);
+  assert.equal(run.primary_stop_trigger, "model_error");
+  assert.match(String(run.last_error), /upstream 500/);
+  const ev = e.storage.store.db
+    .prepare("SELECT payload_json FROM events WHERE campaign_id = ? AND type = 'run.primary_stopped' ORDER BY seq DESC LIMIT 1")
+    .get(spec.campaign_id) as { payload_json: string };
+  assert.match(ev.payload_json, /upstream 500/);
+  e.close();
+});

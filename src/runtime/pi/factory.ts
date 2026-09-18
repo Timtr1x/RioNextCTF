@@ -124,7 +124,10 @@ export class PiWorker implements WorkerRuntime {
     await this.runAgentLoop(lease, context, tools, maxTurns, "primary");
     const trigger = this.classifyPrimaryExit(lease);
     this.primaryStop = trigger;
-    this.deps.storage.recordPrimaryStop(lease.campaign_id, lease.run_id, trigger, lease.step_id);
+    // Keep the provider's own words: a dead run without the reason ("http_500",
+    // a timeout, a connection reset) can only be diagnosed by guessing.
+    const failureDetail = lastAssistant(this.agent?.state.messages ?? [])?.errorMessage ?? null;
+    this.deps.storage.recordPrimaryStop(lease.campaign_id, lease.run_id, trigger, lease.step_id, failureDetail);
     if (this.outcome && isSemanticDisposition(this.outcome.reason) && this.outcome.finish_requested) {
       this.phase = "settled";
       return this.outcome;
@@ -847,9 +850,9 @@ export function artifactSlicePayload(args: {
   };
 }
 
-function lastAssistant(messages: unknown[]): { role?: string; stopReason?: string; content?: unknown } | null {
+function lastAssistant(messages: unknown[]): { role?: string; stopReason?: string; errorMessage?: string; content?: unknown } | null {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as { role?: string; stopReason?: string; content?: unknown };
+    const m = messages[i] as { role?: string; stopReason?: string; errorMessage?: string; content?: unknown };
     if (m.role === "assistant") return m;
   }
   return null;

@@ -149,7 +149,27 @@ export class Engine {
   async start(campaignId: string): Promise<void> {
     this.liveSessionId = campaignId;
     this.banner();
-    this.storage.acquireControllerLock(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
+    // Short controller lease, renewed on a timer for as long as this process
+    // is driving the campaign. A crashed supervisor therefore frees its
+    // campaigns within ~run_lease_ms instead of holding them for an hour.
+    const controllerLease = this.config.run_lease_ms;
+    this.storage.acquireControllerLock(campaignId, this.config.instance_id, controllerLease);
+    const lockHeartbeat = setInterval(() => {
+      try {
+        this.storage.heartbeatControllerLock(campaignId, this.config.instance_id, controllerLease);
+      } catch {
+        // DB closing; the run path surfaces real errors.
+      }
+    }, this.config.heartbeat_ms);
+    lockHeartbeat.unref();
+    try {
+      await this.startLocked(campaignId);
+    } finally {
+      clearInterval(lockHeartbeat);
+    }
+  }
+
+  private async startLocked(campaignId: string): Promise<void> {
     this.storage.recoverStaleRuns(campaignId);
     const camp0 = this.storage.getCampaign(campaignId);
     if (camp0.state === "created") {
@@ -337,7 +357,7 @@ export class Engine {
       const camp = this.storage.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused" || camp.state === "awaiting_verify") break;
       const polled = await this.pollOperations(campaignId);
-      this.storage.heartbeatControllerLock(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
+      this.storage.heartbeatControllerLock(campaignId, this.config.instance_id, this.config.run_lease_ms);
       this.storage.consumeReviewedEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
       const worldEarly = this.storage.getWorld<LabWorld>(campaignId, freshWorld());
@@ -437,6 +457,13 @@ export class Engine {
         break;
       }
       if (!ranDecide && !ranExecute && polled.still_running === 0 && snap.ready_steps === 0) {
+        // A provider outage can park every step at once. Give the transiently
+        // parked ones one more chance before idling; attempt_count caps this,
+        // so a genuinely dead step cannot spin the loop.
+        if (this.storage.requeueTransientSteps(campaignId) > 0) {
+          this.storage.recomputeStepReadiness(campaignId);
+          continue;
+        }
         break;
       }
     }
@@ -707,7 +734,7 @@ function tryLiveCatalog(
       providerId: route.provider.id,
       modelName: route.model.name,
       fetchFn: (url, init) => fetch(url, init),
-      maxRetries: 0,
+      maxRetries: 2,
       timeoutMs: STREAM_TIMEOUT_DEFAULT_MS,
       sessionId: getSessionId,
     });

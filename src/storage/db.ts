@@ -66,6 +66,12 @@ export class Store {
     if ((afterV3?.version ?? 0) < 4) {
       this.migrateToV4();
     }
+    const afterV4 = this.db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get() as
+      | { version: number }
+      | undefined;
+    if ((afterV4?.version ?? 0) < 5) {
+      this.migrateToV5();
+    }
   }
 
   private migrateToV3(): void {
@@ -82,6 +88,13 @@ export class Store {
     this.addColumn("steps", "active_run_id", "TEXT");
     this.addColumn("steps", "next_action", "TEXT");
     this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(4, nowIso());
+  }
+
+  /** Why the run stopped, verbatim (e.g. "http_500", a network error, a
+   *  timeout). Without it a dead run is only diagnosable by inference. */
+  private migrateToV5(): void {
+    this.addColumn("task_runs", "last_error", "TEXT");
+    this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(5, nowIso());
   }
 
   private addColumn(table: string, name: string, decl: string): void {

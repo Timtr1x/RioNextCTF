@@ -57,6 +57,22 @@ export interface IdempotentResult {
 
 export const MAX_STEP_ATTEMPTS = 5;
 
+/**
+ * A framework stop is not a conclusion about the step: the worker died on a
+ * provider/network failure or ran out of budget/context before it could judge
+ * its own work. Parking such a step with `never` (what incompleteReopenRule
+ * returns) silently destroys the retry door — a seed step's `always` was
+ * overwritten that way in production. Keep those retryable; the attempt cap in
+ * reopenSatisfied still bounds the loop. Anything else, including the model's
+ * explicit `never`, keeps the old semantics.
+ */
+function parkRuleForReason(reason: TaskOutcome["reason"]): WakeCondition {
+  if (reason === "protocol_error" || reason === "budget" || reason === "context_limit") {
+    return { kind: "always" };
+  }
+  return incompleteReopenRule();
+}
+
 export class StorageService {
   constructor(
     readonly store: Store,
@@ -1212,7 +1228,7 @@ export class StorageService {
             transitionStep(step.status === "leased" ? "running" : "running", next);
             const park =
               next === "deferred" || next === "blocked"
-                ? asJson(appliedOutcome.reopen_rule ?? incompleteReopenRule())
+                ? asJson(appliedOutcome.reopen_rule ?? parkRuleForReason(appliedOutcome.reason))
                 : null;
             const nextAction = appliedOutcome.reason === "deferred" || appliedOutcome.reason === "blocked"
               ? this.nextActionFromOutcome(appliedOutcome)
@@ -1413,12 +1429,20 @@ export class StorageService {
     });
   }
 
-  recordPrimaryStop(campaignId: string, runId: string, trigger: PrimaryStopTrigger, stepId: string | null): void {
-    this.store.db.prepare("UPDATE task_runs SET primary_stop_trigger = ?, updated_at = ? WHERE id = ?").run(trigger, nowIso(), runId);
+  recordPrimaryStop(
+    campaignId: string,
+    runId: string,
+    trigger: PrimaryStopTrigger,
+    stepId: string | null,
+    lastError: string | null = null,
+  ): void {
+    this.store.db
+      .prepare("UPDATE task_runs SET primary_stop_trigger = ?, last_error = COALESCE(?, last_error), updated_at = ? WHERE id = ?")
+      .run(trigger, lastError, nowIso(), runId);
     this.appendEvent(
       campaignId,
       "run.primary_stopped",
-      { run_id: runId, step_id: stepId, trigger },
+      { run_id: runId, step_id: stepId, trigger, last_error: lastError },
       { kind: "worker", id: runId },
       runId,
     );
@@ -1680,6 +1704,40 @@ export class StorageService {
         this.appendEvent(campaignId, "step.ready", { step_id: s.id, from: s.status }, { kind: "controller", id: "scheduler" }, s.id);
       }
     }
+  }
+
+  /**
+   * Re-ready steps that a framework stop parked (provider/network failure or a
+   * deadline), so one bad minute at the provider cannot permanently empty the
+   * frontier. Complements the park-time rule: this also rescues rows parked
+   * before that rule existed. Bounded by MAX_STEP_ATTEMPTS; returns how many
+   * steps were requeued.
+   */
+  requeueTransientSteps(campaignId: string): number {
+    const rows = this.store.db
+      .prepare(
+        `SELECT id, attempt_count FROM steps
+         WHERE campaign_id = ? AND status = 'deferred' AND attempt_count < ?
+           AND (last_failure LIKE 'primary_stop:model_error%'
+             OR last_failure LIKE 'primary_stop:runtime_error%'
+             OR last_failure LIKE 'primary_stop:deadline%')`,
+      )
+      .all(campaignId, MAX_STEP_ATTEMPTS) as { id: string; attempt_count: number }[];
+    if (rows.length === 0) return 0;
+    const now = nowIso();
+    for (const row of rows) {
+      this.store.db
+        .prepare("UPDATE steps SET status = 'ready', blocked_reason = NULL, ready_since = ?, revision = revision + 1 WHERE id = ?")
+        .run(now, row.id);
+      this.appendEvent(
+        campaignId,
+        "step.ready",
+        { step_id: row.id, from: "deferred", reason: "transient_requeue" },
+        { kind: "controller", id: "scheduler" },
+        row.id,
+      );
+    }
+    return rows.length;
   }
 
   private reopenSatisfied(campaignId: string, rule: WakeCondition, attemptCount: number): boolean {

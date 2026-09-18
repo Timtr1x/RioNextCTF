@@ -72,7 +72,10 @@ test("rionext ui api end to end", async (t) => {
       body: {
         display_name: "Test Provider",
         protocol: "OPENAI_CHAT_COMPLETIONS",
-        base_url: "https://example.invalid/v1/chat/completions",
+        // Connection-refused on a dead local port fails in milliseconds. A name
+        // like example.invalid hangs on a 10s connect timeout instead, and the
+        // engine's model retries multiply that against this suite's budgets.
+        base_url: "http://127.0.0.1:1/v1/chat/completions",
         api_key: "sk-secret-test",
       },
     });

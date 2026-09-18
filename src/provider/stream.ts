@@ -13,6 +13,10 @@ import { createToolStream } from "../runtime/pi/scripted-stream.ts";
 
 export interface CataloguedStreamStats {
   attempts: number;
+  /** Why the last attempt failed, e.g. "http_500" or a network error message.
+   *  Null while the stream has not failed. Persisted by the engine so a dead
+   *  run can be diagnosed without re-running it. */
+  lastError: string | null;
 }
 
 export interface CataloguedStreamOpts {
@@ -24,6 +28,25 @@ export interface CataloguedStreamOpts {
   timeoutMs?: number;
   apiKey?: string;
   sessionId?: string | (() => string);
+  /** Backoff before retry attempt n (1-based). Defaults to 1s, 2s, 4s capped. */
+  retryDelayMs?: (attempt: number) => number;
+}
+
+/**
+ * Transient upstream failures are worth another try; a 400/401/403/404/422 is
+ * a settled answer about the request, so retrying only wastes time.
+ */
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function defaultRetryDelayMs(attempt: number): number {
+  return Math.min(1000 * 2 ** (attempt - 1), 4000);
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function streamThinkingLevel(reasoning: unknown): "low" | "high" | "max" {
@@ -105,8 +128,9 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
   stream: StreamFn;
   stats: CataloguedStreamStats;
 } {
-  const stats: CataloguedStreamStats = { attempts: 0 };
+  const stats: CataloguedStreamStats = { attempts: 0, lastError: null };
   const maxRetries = Math.max(0, opts.maxRetries ?? 0);
+  const retryDelayMs = opts.retryDelayMs ?? defaultRetryDelayMs;
   const stream: StreamFn = (model: Model<string>, context: Context, options) => {
     return (async () => {
       if (options?.signal?.aborted) {
@@ -134,6 +158,7 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
         if (options?.signal?.aborted) {
           return createScriptedAbortStream(model, "cancelled");
         }
+        if (i > 0) await sleep(retryDelayMs(i));
         stats.attempts += 1;
         try {
           const res = await postJson({
@@ -156,15 +181,18 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
             return createTextStream(model, text || "ok", usage);
           }
           lastErr = `http_${res.status}`;
+          if (!isRetryableStatus(res.status)) break;
         } catch (err) {
           const name = err instanceof Error ? err.name : "";
           const msg = err instanceof Error ? err.message : String(err);
           if (name === "AbortError" || /abort/i.test(msg)) {
+            stats.lastError = msg;
             return createScriptedAbortStream(model, options?.signal?.aborted ? "cancelled" : "timeout");
           }
           lastErr = msg;
         }
       }
+      stats.lastError = lastErr;
       return createScriptedErrorStream(model, lastErr);
     })();
   };
