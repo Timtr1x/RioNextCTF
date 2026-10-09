@@ -302,10 +302,10 @@ export type ProposalOp =
         fingerprint?: string;
       };
     }
-  | { op: "revise_step_priority"; step_id: string; expected_revision: number; priority: number }
-  | { op: "retire_step"; step_id: string; expected_revision: number; reason: string }
+  | { op: "revise_step_priority"; step_id: string; expected_revision?: number; priority: number }
+  | { op: "retire_step"; step_id: string; expected_revision?: number; reason: string }
   | { op: "propose_subgoal"; statement: string; parent_id: string; success_predicate_ref?: string }
-  | { op: "retire_subgoal"; goal_id: string; expected_revision: number; reason: string }
+  | { op: "retire_subgoal"; goal_id: string; expected_revision?: number; reason: string }
   | { op: "propose_hypothesis"; proposition: string; support_refs: string[]; conditions: Record<string, unknown> }
   | { op: "request_verification"; finding_or_fact_id: string; method: string }
   | {

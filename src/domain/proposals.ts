@@ -1,5 +1,31 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "./errors.ts";
 import { ALLOWED_PROPOSAL_OPS, type CampaignState, type ProposalOp } from "./types.ts";
+
+/** Legacy default fingerprint: kind|method|question. Kept for merge compat. */
+export function legacyStepFingerprint(kind: string, methodFamily: string, question: string): string {
+  return createHash("sha256").update(`${kind}|${methodFamily}|${question}`).digest("hex").slice(0, 32);
+}
+
+/** Full default fingerprint: also binds goal refs, evidence refs and preconditions. */
+export function defaultStepFingerprint(input: {
+  kind: string;
+  methodFamily: string;
+  question: string;
+  goalRefs: string[];
+  inputRefs: { id: string }[];
+  preconditions: unknown;
+}): string {
+  const canonical = JSON.stringify({
+    kind: input.kind,
+    methodFamily: input.methodFamily,
+    question: input.question.trim().toLowerCase().replace(/\s+/g, " "),
+    goalRefs: [...input.goalRefs].sort(),
+    inputRefs: input.inputRefs.map((r) => r.id).sort(),
+    preconditions: input.preconditions ?? null,
+  });
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+}
 
 const FORBIDDEN_ROOT_MUTATIONS = new Set(["set_root_goal", "enlarge_budget", "enlarge_scope", "complete_campaign"]);
 
@@ -41,14 +67,15 @@ function parseOne(item: unknown, index: number): ProposalOp {
       return {
         op,
         step_id: reqStr(raw, "step_id"),
-        expected_revision: reqInt(raw, "expected_revision"),
+        // optional: the worker fills it from the internal read set
+        expected_revision: typeof raw.expected_revision === "number" ? raw.expected_revision : undefined,
         priority: reqInt(raw, "priority"),
       };
     case "retire_step":
       return {
         op,
         step_id: reqStr(raw, "step_id"),
-        expected_revision: reqInt(raw, "expected_revision"),
+        expected_revision: typeof raw.expected_revision === "number" ? raw.expected_revision : undefined,
         reason: reqStr(raw, "reason"),
       };
     case "propose_subgoal":
@@ -62,7 +89,7 @@ function parseOne(item: unknown, index: number): ProposalOp {
       return {
         op,
         goal_id: reqStr(raw, "goal_id"),
-        expected_revision: reqInt(raw, "expected_revision"),
+        expected_revision: typeof raw.expected_revision === "number" ? raw.expected_revision : undefined,
         reason: reqStr(raw, "reason"),
       };
     case "propose_hypothesis":

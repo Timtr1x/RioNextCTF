@@ -14,7 +14,7 @@ import {
 import type { ContextPack, WorkerFactory, WorkerRuntime } from "../../contracts/worker-runtime.ts";
 import { DomainError } from "../../domain/errors.ts";
 import { newId } from "../../domain/ids.ts";
-import type { RunLease, TaskOutcome, WorkerMode } from "../../domain/types.ts";
+import type { ReadSetEntry, RunLease, TaskOutcome, WorkerMode } from "../../domain/types.ts";
 import type { BudgetLedger } from "../../gateway/budget-ledger.ts";
 import { ingestToolOutputAsData, type ModelGateway, type ToolGateway } from "../../gateway/gateways.ts";
 import type { StorageService } from "../../storage/service.ts";
@@ -78,6 +78,10 @@ export class PiWorker implements WorkerRuntime {
   private stopAfterTurnReason: "turn_cap" | "tool_cap" | "finish" | null = null;
   private activeLease: RunLease | null = null;
   private activeContext: ContextPack | null = null;
+  /** Internal read set: starts as the context manifest's entity revisions and
+   *  grows with graph_query reads. Drives read-set CAS and expected_revision
+   *  defaults; the model never sends revision bookkeeping itself. */
+  private readSetByKey = new Map<string, ReadSetEntry>();
 
   constructor(
     mode: WorkerMode,
@@ -529,6 +533,34 @@ export class PiWorker implements WorkerRuntime {
 
   private buildTools(lease: RunLease, context: ContextPack): AgentTool[] {
     const s = this.deps.storage;
+    this.readSetByKey = new Map(
+      context.manifest.selected_entity_revisions.map((r) => [`${r.table}:${r.id}`, r] as const),
+    );
+    const noteGraphReads = (entity: string, items: unknown[]): void => {
+      const table = entity === "coverage" ? "coverage_items" : entity;
+      for (const item of items) {
+        const r = item as { id?: unknown; revision?: unknown } | null;
+        if (r && typeof r.id === "string" && typeof r.revision === "number") {
+          this.readSetByKey.set(`${table}:${r.id}`, { table, id: r.id, revision: r.revision });
+        }
+      }
+    };
+    /** Ops that adjust an existing entity need its revision. Fill from what the
+     *  run actually read; never silently use the latest database revision. */
+    const fillExpectedRevision = (op: unknown): unknown => {
+      if (!op || typeof op !== "object") return op;
+      const o = op as Record<string, unknown>;
+      const targetTable =
+        o.op === "revise_step_priority" || o.op === "retire_step" ? "steps" : o.op === "retire_subgoal" ? "goals" : null;
+      if (!targetTable || typeof o.expected_revision === "number") return op;
+      const idKey = targetTable === "steps" ? "step_id" : "goal_id";
+      const id = typeof o[idKey] === "string" ? (o[idKey] as string) : "";
+      const entry = this.readSetByKey.get(`${targetTable}:${id}`);
+      if (!entry) {
+        throw new Error(`read_required: read ${idKey} ${id} first (context pack or graph_query with ids) before adjusting it`);
+      }
+      return { ...o, expected_revision: entry.revision };
+    };
     const tools: AgentTool[] = [
       tool("graph_query", "Query graph. The context pack is a compact overview; pass ids (max 50) to read full detail of specific entities. Default order is oldest first; raise offset to page. Pass order=desc for newest first.", Type.Object({
         entity: Type.String({ description: "facts|steps|goals|findings|coverage|observations" }),
@@ -540,6 +572,7 @@ export class PiWorker implements WorkerRuntime {
         const p = params as { entity: string; ids?: string[]; limit?: number; offset?: number; order?: string };
         const order = p.order === "desc" ? "desc" : "asc";
         const result = s.graphQuery(lease.campaign_id, { entity: p.entity, ids: p.ids, limit: p.limit, offset: p.offset, order });
+        noteGraphReads(p.entity, result.items);
         return ok(result);
       }),
       tool("artifact_read", "Read a byte slice of a saved original. If kali_run set truncated, pass artifact_id and next_offset to get the next chunk.", Type.Object({
@@ -592,9 +625,9 @@ export class PiWorker implements WorkerRuntime {
               producer_id: lease.run_id,
               submission_id: newId("sub"),
               run_id: lease.run_id,
-              operations: p.operations,
+              operations: Array.isArray(p.operations) ? p.operations.map(fillExpectedRevision) : p.operations,
               no_change_reason: p.no_change_reason,
-              read_set: context.manifest.selected_entity_revisions,
+              read_set: [...this.readSetByKey.values()],
               reviewed_through_seq: context.manifest.graph_snapshot_seq,
             });
             return ok(result);
@@ -686,36 +719,59 @@ export class PiWorker implements WorkerRuntime {
           this.recordSubmit("find", result.canonical_ids.finding_id);
           return ok(result);
         }),
-        tool("propose_step", "Suggest a step", Type.Object({
+        tool("propose_step", "Suggest a step. Only question is required: kind defaults to explore, method_family to the current step's family, and the fingerprint is generated from the canonical fields.", Type.Object({
           question: Type.String(),
-          kind: Type.String(),
-          method_family: Type.String(),
-          fingerprint: Type.String(),
+          kind: Type.Optional(Type.String({ description: "explore (default) | verify | acquire_prerequisite | reconcile" })),
+          method_family: Type.Optional(Type.String()),
+          fingerprint: Type.Optional(Type.String()),
           preconditions: Type.Optional(Type.Unknown()),
           retry_reason: Type.Optional(Type.String()),
         }), async (_id, params) => {
           const p = params as {
             question: string;
-            kind: "explore" | "verify" | "acquire_prerequisite" | "reconcile";
-            method_family: string;
-            fingerprint: string;
+            kind?: string;
+            method_family?: string;
+            fingerprint?: string;
             preconditions?: unknown;
             retry_reason?: string;
           };
+          const kind =
+            p.kind === "verify" || p.kind === "acquire_prerequisite" || p.kind === "reconcile" ? p.kind : ("explore" as const);
+          // The current step's family is the suggestion default; the model may
+          // always name another family — families recommend, they don't gate.
+          let family = p.method_family;
+          if (!family && lease.step_id) {
+            const cur = s.store.db.prepare("SELECT method_family FROM steps WHERE id = ?").get(lease.step_id) as
+              | { method_family: string }
+              | undefined;
+            family = cur?.method_family;
+          }
+          family = family || "generic";
           const root = s.store.db.prepare("SELECT id FROM goals WHERE campaign_id = ? AND is_root = 1").get(lease.campaign_id) as { id: string };
+          const goalRefs = [root.id];
+          const preconditions = (p.preconditions as never) ?? { op: "all", of: [] };
+          const fingerprint = s.stepFingerprintResolve(lease.campaign_id, {
+            kind,
+            methodFamily: family,
+            question: p.question,
+            goalRefs,
+            inputRefs: [],
+            preconditions,
+            explicit: p.fingerprint,
+          });
           const result = s.proposeStepDirect({
             campaign_id: lease.campaign_id,
             producer_id: lease.run_id,
             submission_id: newId("sub"),
             run_id: lease.run_id,
             question: p.question,
-            kind: p.kind,
-            goal_refs: [root.id],
-            preconditions: (p.preconditions as never) ?? { op: "all", of: [] },
-            method_family: p.method_family,
+            kind,
+            goal_refs: goalRefs,
+            preconditions,
+            method_family: family,
             expected_observations: [],
-            completion_criteria: "observe",
-            fingerprint: p.fingerprint,
+            completion_criteria: "获得可解释的新结果",
+            fingerprint,
             reopen_rule: { kind: "never" },
             retry_reason: p.retry_reason,
           });

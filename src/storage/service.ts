@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { DomainError, conflict, denied, invalidInput } from "../domain/errors.ts";
 import { newId, newCorrelationId } from "../domain/ids.ts";
 import { evalPredicate, type FactLookup } from "../domain/predicates.ts";
-import { parseProposalOps } from "../domain/proposals.ts";
+import { defaultStepFingerprint, legacyStepFingerprint, parseProposalOps } from "../domain/proposals.ts";
 import { hashJson } from "../domain/fingerprint.ts";
 import { transitionCampaign, transitionFinding, transitionStep } from "../domain/states.ts";
 import type {
@@ -953,6 +953,34 @@ export class StorageService {
       this.store.db.prepare("UPDATE findings SET status = ?, revision = revision + 1 WHERE id = ?").run(to, findingId);
       this.appendEvent(campaignId, "finding.status_changed", { finding_id: findingId, from: row.status, to }, actor, findingId);
     });
+  }
+
+  /**
+   * Fingerprint resolution for propose_step. Explicit fingerprints pass through
+   * unchanged. Otherwise: if a live step still carries the legacy default
+   * (kind|method|question), merge into it; only then mint the richer default
+   * that also binds goal refs, evidence refs and preconditions — so the same
+   * question at a different goal or with different evidence never merges.
+   */
+  stepFingerprintResolve(
+    campaignId: string,
+    step: {
+      kind: string;
+      methodFamily: string;
+      question: string;
+      goalRefs: string[];
+      inputRefs: { id: string }[];
+      preconditions: unknown;
+      explicit?: string;
+    },
+  ): string {
+    if (step.explicit) return step.explicit;
+    const legacy = legacyStepFingerprint(step.kind, step.methodFamily, step.question);
+    const legacyHit = this.store.db
+      .prepare("SELECT id FROM steps WHERE campaign_id = ? AND fingerprint = ? AND status != 'retired'")
+      .get(campaignId, legacy);
+    if (legacyHit) return legacy;
+    return defaultStepFingerprint(step);
   }
 
   proposeStepDirect(args: {
@@ -2042,12 +2070,15 @@ export class StorageService {
           (this.store.db.prepare("SELECT COUNT(*) AS c FROM steps WHERE campaign_id = ? AND source_run_id = ?").get(campaignId, runId) as { c: number }).c,
         );
         if (already >= 8) return camp.event_head;
-        const fp =
-          step.fingerprint ??
-          createHash("sha256")
-            .update(`${step.kind}|${step.methodFamily}|${step.question}`)
-            .digest("hex")
-            .slice(0, 32);
+        const fp = this.stepFingerprintResolve(campaignId, {
+          kind: step.kind,
+          methodFamily: step.methodFamily,
+          question: step.question,
+          goalRefs: step.goalRefs,
+          inputRefs: step.inputRefs,
+          preconditions: step.preconditions,
+          explicit: step.fingerprint,
+        });
         const result = this.proposeStepDirect({
           campaign_id: campaignId,
           producer_id: `inner-${runId}`,
@@ -2069,6 +2100,9 @@ export class StorageService {
         return result.seq;
       }
       case "revise_step_priority": {
+        if (typeof op.expected_revision !== "number") {
+          throw invalidInput("revision_required", "revise_step_priority requires expected_revision (read the step first)");
+        }
         const row = this.store.db.prepare("SELECT revision FROM steps WHERE id = ? AND campaign_id = ?").get(op.step_id, campaignId) as
           | { revision: number }
           | undefined;
@@ -2078,6 +2112,9 @@ export class StorageService {
         return camp.event_head;
       }
       case "retire_step": {
+        if (typeof op.expected_revision !== "number") {
+          throw invalidInput("revision_required", "retire_step requires expected_revision (read the step first)");
+        }
         const row = this.store.db.prepare("SELECT revision, status FROM steps WHERE id = ? AND campaign_id = ?").get(op.step_id, campaignId) as
           | { revision: number; status: StepStatus }
           | undefined;
