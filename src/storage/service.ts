@@ -73,6 +73,20 @@ function parkRuleForReason(reason: TaskOutcome["reason"]): WakeCondition {
   return incompleteReopenRule();
 }
 
+/** Entity name → table for graph_query; anything else is rejected. */
+function graphEntityTable(entity: string): string {
+  const table = {
+    facts: "facts",
+    steps: "steps",
+    goals: "goals",
+    findings: "findings",
+    coverage: "coverage_items",
+    observations: "observations",
+  }[entity];
+  if (!table) throw invalidInput("unknown_entity", `graph_query entity ${entity} not allowed`);
+  return table;
+}
+
 export class StorageService {
   constructor(
     readonly store: Store,
@@ -1765,7 +1779,7 @@ export class StorageService {
     return false;
   }
 
-  graphQuery(campaignId: string, args: { entity: string; limit?: number; offset?: number; q?: string; depth?: number; order?: "asc" | "desc" }): {
+  graphQuery(campaignId: string, args: { entity: string; limit?: number; offset?: number; q?: string; depth?: number; order?: "asc" | "desc"; ids?: string[] }): {
     items: unknown[];
     truncated: boolean;
     omitted: number;
@@ -1775,6 +1789,17 @@ export class StorageService {
     const offset = args.offset ?? 0;
     const dir = args.order === "desc" ? "DESC" : "ASC";
     const camp = this.getCampaign(campaignId);
+    // Detail reads by id, for entities the overview omitted. Always scoped to
+    // this campaign; ids from another campaign simply match nothing.
+    if (args.ids && args.ids.length > 0) {
+      const table = graphEntityTable(args.entity);
+      const ids = [...new Set(args.ids)].slice(0, 50);
+      const marks = ids.map(() => "?").join(",");
+      const rows = this.store.db
+        .prepare(`SELECT * FROM ${table} WHERE campaign_id = ? AND id IN (${marks})`)
+        .all(campaignId, ...ids);
+      return { items: rows, truncated: false, omitted: 0, snapshot_seq: camp.event_head };
+    }
     let rows: unknown[] = [];
     switch (args.entity) {
       case "facts":

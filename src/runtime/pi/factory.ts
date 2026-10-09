@@ -529,15 +529,16 @@ export class PiWorker implements WorkerRuntime {
   private buildTools(lease: RunLease, context: ContextPack): AgentTool[] {
     const s = this.deps.storage;
     const tools: AgentTool[] = [
-      tool("graph_query", "Query graph. Default order is oldest first; raise offset to page. The context pack already injects the newest observations. Pass order=desc for newest first.", Type.Object({
+      tool("graph_query", "Query graph. The context pack is a compact overview; pass ids (max 50) to read full detail of specific entities. Default order is oldest first; raise offset to page. Pass order=desc for newest first.", Type.Object({
         entity: Type.String({ description: "facts|steps|goals|findings|coverage|observations" }),
+        ids: Type.Optional(Type.Array(Type.String(), { description: "read these entity ids directly (max 50)" })),
         limit: Type.Optional(Type.Number()),
         offset: Type.Optional(Type.Number()),
         order: Type.Optional(Type.String({ description: "asc (oldest first, default) or desc (newest first)" })),
       }), async (_id, params) => {
-        const p = params as { entity: string; limit?: number; offset?: number; order?: string };
+        const p = params as { entity: string; ids?: string[]; limit?: number; offset?: number; order?: string };
         const order = p.order === "desc" ? "desc" : "asc";
-        const result = s.graphQuery(lease.campaign_id, { entity: p.entity, limit: p.limit, offset: p.offset, order });
+        const result = s.graphQuery(lease.campaign_id, { entity: p.entity, ids: p.ids, limit: p.limit, offset: p.offset, order });
         return ok(result);
       }),
       tool("artifact_read", "Read a byte slice of a saved original. If kali_run set truncated, pass artifact_id and next_offset to get the next chunk.", Type.Object({

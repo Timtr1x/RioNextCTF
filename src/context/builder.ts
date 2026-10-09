@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { ContextPack } from "../contracts/worker-runtime.ts";
 import { SKILL_BY_METHOD_FAMILY } from "../domain/challenge-kind.ts";
 import { hashJson } from "../domain/fingerprint.ts";
-import type { ContextManifest, ReadSetEntry, RunLease } from "../domain/types.ts";
+import type { ContextManifest, RunLease } from "../domain/types.ts";
 import type { StorageService } from "../storage/service.ts";
 import {
   binGroupsForCaps,
@@ -11,6 +11,7 @@ import {
   KALI_BACKGROUND_BINS,
   resolveToolCapabilities,
 } from "../tools/kali-profile.ts";
+import { buildModelGraphView } from "./model-view.ts";
 import { PROMPT_VERSION } from "../version.ts";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -173,6 +174,8 @@ const PACK_HARD_LIMIT = 400_000;
 const PACK_SAFETY_MARGIN = 20_000;
 const OBS_ITEM_MIN = 2_000;
 const OBS_ITEM_MAX = 64_000;
+/** Soft budget for the graph overview itself; observation previews get the rest. */
+const SOFT_GRAPH_BUDGET = 120_000;
 
 function fitObservationBodies(payload: Record<string, unknown>, items: unknown[]): void {
   if (items.length === 0) return;
@@ -200,38 +203,77 @@ function fitObservationBodies(payload: Record<string, unknown>, items: unknown[]
 
 export function buildContextPack(storage: StorageService, lease: RunLease, extra: Record<string, unknown> = {}): ContextPack {
   const camp = storage.getCampaign(lease.campaign_id);
-  const facts = storage.graphQuery(lease.campaign_id, { entity: "facts", limit: 30 });
-  const steps = storage.graphQuery(lease.campaign_id, { entity: "steps", limit: 30 });
-  const goals = storage.graphQuery(lease.campaign_id, { entity: "goals", limit: 20 });
-  const findings = storage.graphQuery(lease.campaign_id, { entity: "findings", limit: 20 });
-  const coverage = storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 });
+  // One short transaction: the whole initial view is a consistent snapshot.
+  const view = storage.store.transaction(() =>
+    buildModelGraphView(storage, lease.campaign_id, { currentStepId: lease.step_id ?? null, softBudget: SOFT_GRAPH_BUDGET }),
+  );
   const observations = storage.graphQuery(lease.campaign_id, { entity: "observations", limit: 20, order: "desc" });
+  const totalObservations = Number(
+    (
+      storage.store.db.prepare("SELECT COUNT(*) AS c FROM observations WHERE campaign_id = ?").get(lease.campaign_id) as {
+        c: number;
+      }
+    ).c,
+  );
   const hints = storage.listHints(lease.campaign_id);
   const checkpoint = storage.latestCheckpoint(lease.campaign_id, { runId: lease.run_id, stepId: lease.step_id });
+  const budgetRow = storage.store.db
+    .prepare("SELECT free_calls, free_tokens FROM budget_accounts WHERE campaign_id = ?")
+    .get(lease.campaign_id) as { free_calls: number; free_tokens: number } | undefined;
+
+  // Coverage only burdens models when the task actually carries coverage
+  // obligations: assessment mode, or user-declared mandatory ids.
+  const showCoverage = camp.spec.mode === "assessment" || camp.spec.coverage_policy.mandatory_ids.length > 0;
+  const coverage = showCoverage
+    ? storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 })
+    : null;
+
+  const omitted = [...view.omitted];
+  const obsOmitted = totalObservations - observations.items.length;
+  if (obsOmitted > 0) {
+    omitted.push({
+      kind: "observations",
+      total: totalObservations,
+      included: observations.items.length,
+      omitted: obsOmitted,
+      read_more: { entity: "observations", order: "desc", ids_param: true },
+    });
+  }
+
   const payload: Record<string, unknown> = {
     campaign_id: lease.campaign_id,
-    mode: lease.mode,
     run_id: lease.run_id,
-    fence: lease.fence,
-    cancel_epoch: lease.cancel_epoch,
-    root_goal: camp.spec.root_goal,
-    scope: camp.spec.scope,
-    policy_version: camp.spec.policy_version,
-    scope_version: camp.spec.scope_version,
-    goal_version: camp.spec.goal_version,
-    remaining_budget: {
-      calls: storage.store.db.prepare("SELECT free_calls FROM budget_accounts WHERE campaign_id = ?").get(lease.campaign_id),
+    mode: lease.mode,
+    goal: { statement: camp.spec.root_goal.statement, completion: camp.spec.root_goal.success_predicate_ref },
+    scope: {
+      assets: camp.spec.scope.assets,
+      entries: camp.spec.scope.entries,
+      exclusions: camp.spec.scope.exclusions,
     },
-    graph: { facts: facts.items, steps: steps.items, goals: goals.items, findings: findings.items, coverage: coverage.items, observations: observations.items },
+    resources: {
+      remaining_calls: budgetRow?.free_calls ?? null,
+      remaining_tokens: budgetRow?.free_tokens ?? null,
+    },
+    graph: {
+      goals: view.goals,
+      steps: view.steps,
+      facts: view.facts,
+      findings: view.findings,
+      ...(coverage ? { coverage: coverage.items } : {}),
+      observations: observations.items,
+    },
+    recent_results: recentResults(storage, lease.campaign_id),
     hints,
     pending_goal_claim: storage.pendingGoalClaim(lease.campaign_id),
     checkpoint,
-    omitted: [facts, steps, goals, findings, coverage, observations].filter((g) => g.truncated).map((g) => ({ truncated: true })),
+    omitted,
     ...extra,
   };
   if (lease.step_id) {
-    const step = storage.store.db.prepare("SELECT * FROM steps WHERE id = ?").get(lease.step_id);
-    payload.current_step = step;
+    const step = storage.store.db.prepare("SELECT * FROM steps WHERE id = ?").get(lease.step_id) as
+      | Record<string, unknown>
+      | undefined;
+    payload.current_step = step ? projectCurrentStep(step) : null;
     if (lease.mode === "execute") {
       payload.skill_pack = buildSkillPack(camp, step);
     }
@@ -251,7 +293,7 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
     scope_version: camp.spec.scope_version,
     policy_version: camp.spec.policy_version,
     model_id: camp.spec.model_policy.model,
-    selected_entity_revisions: entityRevisions(facts.items, steps.items, goals.items),
+    selected_entity_revisions: view.includedRevisions,
     artifact_slices: [],
     omitted_items: payload.omitted as ContextManifest["omitted_items"],
     estimated_tokens: Math.ceil(encoded.length / 4),
@@ -297,17 +339,69 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   };
 }
 
-function entityRevisions(facts: unknown[], steps: unknown[], goals: unknown[]): ReadSetEntry[] {
-  const out: ReadSetEntry[] = [];
-  const take = (table: string, rows: unknown[]) => {
-    for (const row of rows) {
-      if (!row || typeof row !== "object") continue;
-      const r = row as { id?: unknown; revision?: unknown };
-      if (typeof r.id === "string") out.push({ table, id: r.id, revision: Number(r.revision ?? 1) });
+/** Current step projected for the model: parsed columns, no control fields. */
+function projectCurrentStep(row: Record<string, unknown>): Record<string, unknown> {
+  const parse = (key: string): unknown => {
+    try {
+      return JSON.parse(String(row[key] ?? "null"));
+    } catch {
+      return null;
     }
   };
-  take("facts", facts);
-  take("steps", steps);
-  take("goals", goals);
-  return out;
+  return {
+    id: row.id,
+    question: row.question,
+    kind: row.kind,
+    status: row.status,
+    priority: row.priority,
+    method_family: row.method_family,
+    completion_criteria: row.completion_criteria,
+    preconditions: parse("preconditions_json"),
+    input_refs: parse("input_refs_json") ?? [],
+    goal_refs: parse("goal_refs_json") ?? [],
+    expected_observations: parse("expected_observations_json") ?? [],
+    attempt_count: row.attempt_count,
+    next_action: row.next_action ?? null,
+    last_failure: row.last_failure ?? null,
+    blocked_reason: row.blocked_reason ?? null,
+  };
+}
+
+/** Recent execute results per §5.7: what the last runs concluded and proposed. */
+function recentResults(storage: StorageService, campaignId: string, limit = 6): Record<string, unknown>[] {
+  const rows = storage.store.db
+    .prepare(
+      `SELECT tr.step_id, tr.attempt_no, tr.end_reason, tr.outcome_json,
+              s.question, s.next_action AS step_next_action, s.attempt_count
+       FROM task_runs tr JOIN steps s ON s.id = tr.step_id
+       WHERE tr.campaign_id = ? AND tr.step_id IS NOT NULL AND tr.outcome_json IS NOT NULL
+       ORDER BY tr.rowid DESC LIMIT ?`,
+    )
+    .all(campaignId, limit) as {
+    step_id: string;
+    attempt_no: number;
+    end_reason: string | null;
+    outcome_json: string;
+    question: string;
+    step_next_action: string | null;
+    attempt_count: number;
+  }[];
+  return rows.map((r) => {
+    let outcome: { summary?: string; next_action?: string | null; reason?: string } = {};
+    try {
+      outcome = JSON.parse(r.outcome_json) as typeof outcome;
+    } catch {
+      // keep the empty outcome; the framework reason still shows
+    }
+    return {
+      step_id: r.step_id,
+      question: r.question.length > 200 ? `${r.question.slice(0, 200)}…` : r.question,
+      attempt: r.attempt_no,
+      attempt_count: r.attempt_count,
+      summary: (outcome.summary ?? "").slice(0, 400),
+      next_action: outcome.next_action ?? r.step_next_action ?? null,
+      disposition: outcome.reason ?? null,
+      end_reason: r.end_reason,
+    };
+  });
 }
