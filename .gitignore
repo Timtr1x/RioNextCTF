@@ -14,3 +14,8 @@ v0.1/
 v0.2/
 .zcode/
 .research/
+work/
+scripts/
+spark-retest.json
+contest-challenges-*/
+*.zip
