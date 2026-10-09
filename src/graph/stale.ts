@@ -28,16 +28,3 @@ export function markFactsStaleForEnv(storage: StorageService, campaignId: string
 function sCount(n: number): number {
   return n;
 }
-
-export function applyWaiver(
-  storage: StorageService,
-  campaignId: string,
-  obligation: string,
-  reason: string,
-  actorId: string,
-): void {
-  storage.updateCoverage(campaignId, obligation, { execution_state: "waived" });
-  storage.store.db
-    .prepare("UPDATE coverage_items SET waiver_reason = ? WHERE campaign_id = ? AND obligation = ?")
-    .run(`${actorId}: ${reason}`, campaignId, obligation);
-}

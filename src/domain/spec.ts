@@ -7,7 +7,6 @@ export const DEFAULT_MAX_CALLS = 3000;
 export const DEFAULT_MAX_TOKENS = 120_000_000;
 
 export const ALLOWED_MODELS = new Set(["scripted", "scripted-react"]);
-export const ALLOWED_PROVIDERS = new Set(["scripted"]);
 export const ALLOWED_STATES = new Set<CampaignState>([
   "created",
   "active",
@@ -188,12 +187,6 @@ function parseChallengeInfo(raw: unknown): ChallengeInfo | undefined {
   const endpoint = optionalString(obj, "endpoint");
   if (endpoint) out.endpoint = endpoint;
   return out;
-}
-
-export function assertKnownState(state: string): asserts state is CampaignState {
-  if (!ALLOWED_STATES.has(state as CampaignState)) {
-    throw invalidInput("unknown_state", `unknown campaign state ${state}`);
-  }
 }
 
 function requireString(obj: Record<string, unknown>, key: string): string {

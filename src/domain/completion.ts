@@ -144,15 +144,3 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
 
   return { canClose: true, suggestedState: "completed", blockers: [] };
 }
-
-export function coverageIsTested(row: CoverageRow): boolean {
-  return (
-    row.applicability === "applicable" &&
-    row.execution_state === "tested" &&
-    row.evidence_state === "current"
-  );
-}
-
-export function toolSuccessDoesNotMarkCoverageTested(): true {
-  return true;
-}

@@ -71,8 +71,6 @@ const MIME: Record<string, string> = {
   ".map": "application/json; charset=utf-8",
 };
 
-export const API_ERROR_SHAPE = "error_shape_v1";
-
 function statusFor(err: unknown): number {
   if (err instanceof DomainError) {
     switch (err.category) {

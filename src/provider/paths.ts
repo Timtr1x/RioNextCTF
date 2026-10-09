@@ -36,7 +36,3 @@ export function completeBaseUrl(raw: string, protocol: Protocol): string {
   }
   return `${url.origin}${path}${want}`;
 }
-
-export function requestUrl(base: string, protocol: Protocol): string {
-  return completeBaseUrl(base, protocol);
-}

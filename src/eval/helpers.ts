@@ -32,9 +32,3 @@ export function loadKaliSpec(id = "camp_kali_lab"): CampaignSpec {
   const raw = JSON.parse(readFileSync(join(root, "profiles/kali-lab.json"), "utf8")) as CampaignSpec;
   return { ...raw, campaign_id: id };
 }
-
-export function tmpDir(label: string): string {
-  const base = process.env.RIONEXT_TEST_DIR ?? join(process.cwd(), ".rionext-test");
-  const dir = join(base, `${label}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  return dir;
-}

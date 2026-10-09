@@ -25,10 +25,6 @@ export function assertTransition<S extends string>(
   }
 }
 
-export function canTransitionCampaign(from: CampaignState, to: CampaignState): boolean {
-  return CAMPAIGN_TRANSITIONS[from].includes(to);
-}
-
 export function transitionCampaign(from: CampaignState, to: CampaignState): CampaignState {
   assertTransition(CAMPAIGN_TRANSITIONS, from, to, "campaign");
   return to;
@@ -42,20 +38,4 @@ export function transitionStep(from: StepStatus, to: StepStatus): StepStatus {
 export function transitionFinding(from: FindingStatus, to: FindingStatus): FindingStatus {
   assertTransition(FINDING_TRANSITIONS, from, to, "finding");
   return to;
-}
-
-export function isTerminalCampaign(state: CampaignState): boolean {
-  return state === "completed" || state === "cancelled";
-}
-
-export function isQuiescentCampaign(state: CampaignState): boolean {
-  return (
-    state === "blocked" ||
-    state === "plateau" ||
-    state === "budget_paused" ||
-    state === "paused" ||
-    state === "awaiting_verify" ||
-    state === "completed" ||
-    state === "cancelled"
-  );
 }

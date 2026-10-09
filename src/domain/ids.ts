@@ -31,11 +31,3 @@ export function newId(prefix: IdPrefix): string {
 export function newCorrelationId(): string {
   return newId("corr");
 }
-
-export function assertSameCampaign(ownerCampaignId: string, refCampaignId: string, what: string): void {
-  if (ownerCampaignId !== refCampaignId) {
-    throw Object.assign(new Error(`cross_campaign_ref: ${what}`), {
-      code: "cross_campaign_ref" as const,
-    });
-  }
-}

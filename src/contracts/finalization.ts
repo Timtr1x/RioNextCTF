@@ -17,8 +17,6 @@ export type PrimaryStopTrigger =
 
 export type ModelStepDisposition = "resolved" | "deferred" | "blocked";
 
-export const SEMANTIC_DISPOSITIONS: readonly ModelStepDisposition[] = ["resolved", "deferred", "blocked"];
-
 export interface FinishStepInput {
   disposition: ModelStepDisposition;
   summary: string;
