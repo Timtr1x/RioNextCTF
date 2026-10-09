@@ -49,6 +49,10 @@ export interface CompletionSnapshot {
   new_observation_since_progress: boolean;
   /** Planner-relevant input not yet reviewed (requested_seq > reviewed_seq). */
   pending_decision?: boolean;
+  /** Delivery gates, normalized with legacy defaults: old assessment specs stay
+   *  strict, old goal_seeking specs stay finding/coverage-relaxed. */
+  require_confirmed_findings?: boolean;
+  require_complete?: boolean;
   findings: { status: FindingStatus }[];
   coverage: CoverageRow[];
   root_goal_satisfied: boolean;
@@ -70,6 +74,34 @@ export interface CompletionResult {
   blockers: string[];
 }
 
+/** Delivery gates, normalized with legacy defaults: old assessment specs stay
+ *  strict, old goal_seeking specs stay finding/coverage-relaxed. */
+export function confirmedFindingsRequired(mode: string, explicit?: boolean): boolean {
+  return explicit ?? mode === "assessment";
+}
+
+export function completeCoverageRequired(mode: string, explicit?: boolean): boolean {
+  return explicit ?? mode === "assessment";
+}
+
+const FINDING_PENDING_STATUSES = new Set(["suspected", "validating", "inconclusive", "stale"]);
+
+/** Explicit delivery requirements that must hold before canClose=true. */
+function deliveryGateBlockers(snap: CompletionSnapshot): string[] {
+  const blockers: string[] = [];
+  if (confirmedFindingsRequired(snap.mode, snap.require_confirmed_findings)) {
+    const pending = snap.findings.filter((f) => FINDING_PENDING_STATUSES.has(f.status));
+    if (pending.length > 0) blockers.push("findings_pending_verification");
+  }
+  if (completeCoverageRequired(snap.mode, snap.require_complete)) {
+    const mandatoryUntested = snap.coverage.filter(
+      (c) => c.mandatory && c.applicability === "applicable" && c.execution_state !== "tested" && c.execution_state !== "waived",
+    );
+    if (mandatoryUntested.length > 0) blockers.push("mandatory_coverage_untested");
+  }
+  return blockers;
+}
+
 export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
   const blockers: string[] = [];
   if (snap.state === "cancelled") {
@@ -87,6 +119,11 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
     return { canClose: false, suggestedState: "waiting", blockers };
   }
   if (snap.mode === "goal_seeking" && snap.root_goal_satisfied) {
+    // explicit delivery requirements still gate a satisfied root goal
+    const gate = deliveryGateBlockers(snap);
+    if (gate.length > 0) {
+      return { canClose: false, suggestedState: "active", blockers: gate };
+    }
     return { canClose: true, suggestedState: "completed", blockers: [] };
   }
   if (snap.mode === "goal_seeking" && snap.pending_goal_claim) {
@@ -125,36 +162,37 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
     return { canClose: true, suggestedState: "completed", blockers: [] };
   }
 
-  const mandatoryUntested = snap.coverage.filter(
-    (c) => c.mandatory && c.applicability === "applicable" && c.execution_state !== "tested" && c.execution_state !== "waived",
-  );
-  if (mandatoryUntested.length > 0) {
-    blockers.push("mandatory_coverage_untested");
-    if (snap.blocked_steps > 0) {
-      return { canClose: false, suggestedState: "blocked", blockers };
-    }
-    if (snap.empty_reviews < snap.max_empty_reviews) {
-      return { canClose: false, suggestedState: "active", blockers: [...blockers, "review_allowance_remaining"] };
-    }
-    return { canClose: false, suggestedState: "plateau", blockers };
+  const findingsGate = deliveryGateBlockers(snap).filter((b) => b === "findings_pending_verification");
+  if (findingsGate.length > 0) {
+    return { canClose: false, suggestedState: "waiting", blockers: findingsGate };
   }
 
-  const mandatoryBadEvidence = snap.coverage.filter(
-    (c) =>
-      c.mandatory &&
-      c.applicability === "applicable" &&
-      c.execution_state === "tested" &&
-      (c.evidence_state === "stale" || c.evidence_state === "missing"),
-  );
-  if (mandatoryBadEvidence.length > 0) {
-    blockers.push("coverage_evidence_not_current");
-    return { canClose: false, suggestedState: "plateau", blockers };
-  }
+  if (completeCoverageRequired(snap.mode, snap.require_complete)) {
+    const mandatoryUntested = snap.coverage.filter(
+      (c) => c.mandatory && c.applicability === "applicable" && c.execution_state !== "tested" && c.execution_state !== "waived",
+    );
+    if (mandatoryUntested.length > 0) {
+      blockers.push("mandatory_coverage_untested");
+      if (snap.blocked_steps > 0) {
+        return { canClose: false, suggestedState: "blocked", blockers };
+      }
+      if (snap.empty_reviews < snap.max_empty_reviews) {
+        return { canClose: false, suggestedState: "active", blockers: [...blockers, "review_allowance_remaining"] };
+      }
+      return { canClose: false, suggestedState: "plateau", blockers };
+    }
 
-  const pendingFindings = snap.findings.filter((f) => f.status === "suspected" || f.status === "validating");
-  if (pendingFindings.length > 0) {
-    blockers.push("findings_pending_verification");
-    return { canClose: false, suggestedState: "waiting", blockers };
+    const mandatoryBadEvidence = snap.coverage.filter(
+      (c) =>
+        c.mandatory &&
+        c.applicability === "applicable" &&
+        c.execution_state === "tested" &&
+        (c.evidence_state === "stale" || c.evidence_state === "missing"),
+    );
+    if (mandatoryBadEvidence.length > 0) {
+      blockers.push("coverage_evidence_not_current");
+      return { canClose: false, suggestedState: "plateau", blockers };
+    }
   }
 
   if (snap.frontier_size === 0 && !snap.new_observation_since_progress) {
@@ -163,12 +201,14 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
     }
   }
 
-  const untestedApplicable = snap.coverage.filter(
-    (c) => c.applicability === "applicable" && c.execution_state === "untested",
-  );
-  if (untestedApplicable.length > 0) {
-    blockers.push("applicable_coverage_untested");
-    return { canClose: false, suggestedState: "plateau", blockers };
+  if (completeCoverageRequired(snap.mode, snap.require_complete)) {
+    const untestedApplicable = snap.coverage.filter(
+      (c) => c.applicability === "applicable" && c.execution_state === "untested",
+    );
+    if (untestedApplicable.length > 0) {
+      blockers.push("applicable_coverage_untested");
+      return { canClose: false, suggestedState: "plateau", blockers };
+    }
   }
 
   return { canClose: true, suggestedState: "completed", blockers: [] };

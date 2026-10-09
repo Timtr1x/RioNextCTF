@@ -1,4 +1,4 @@
-import type { TaskOutcome, TaskOutcomeReason, VerificationResult, WakeCondition } from "../domain/types.ts";
+import type { CoverageResultItem, TaskOutcome, TaskOutcomeReason, VerificationResult, WakeCondition } from "../domain/types.ts";
 
 export type WorkerPhase = "primary" | "finalizing" | "settled";
 
@@ -27,6 +27,27 @@ export interface FinishStepInput {
   next_action?: string;
   /** Verify runs only: an explicit verdict on the step's target. */
   verification_result?: VerificationResult;
+  /** Assessment runs only: explicit per-obligation results (max 8). */
+  coverage_result?: CoverageResultItem[];
+}
+
+export function parseCoverageResults(raw: unknown): CoverageResultItem[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: CoverageResultItem[] = [];
+  for (const item of raw.slice(0, 8)) {
+    if (!item || typeof item !== "object") continue;
+    const p = item as Record<string, unknown>;
+    if (typeof p.coverage_id !== "string" || !p.coverage_id) continue;
+    if (!["no_issue_observed", "suspected", "confirmed", "inconclusive"].includes(String(p.outcome))) continue;
+    const evidence_refs = Array.isArray(p.evidence_refs) ? p.evidence_refs.filter((x): x is string => typeof x === "string") : [];
+    out.push({
+      coverage_id: p.coverage_id,
+      outcome: p.outcome as CoverageResultItem["outcome"],
+      evidence_refs: evidence_refs.slice(0, 32),
+      note: typeof p.note === "string" ? p.note.slice(0, 1000) : "",
+    });
+  }
+  return out;
 }
 
 export function parseVerificationResult(raw: unknown): VerificationResult | undefined {
@@ -169,6 +190,7 @@ export function parseFinishInput(raw: unknown): { ok: true; value: FinishStepInp
       reopen_rule: reopen_rule ?? undefined,
       next_action,
       verification_result: parseVerificationResult(p.verification_result),
+      coverage_result: parseCoverageResults(p.coverage_result),
     },
   };
 }
@@ -208,6 +230,16 @@ export function canonicalizeFinishPayload(p: FinishStepInput): string {
           evidence_refs: [...p.verification_result.evidence_refs].sort(),
           rationale: p.verification_result.rationale,
         }
+      : null,
+    coverage_result: p.coverage_result
+      ? p.coverage_result
+          .map((r) => ({
+            coverage_id: r.coverage_id,
+            outcome: r.outcome,
+            evidence_refs: [...r.evidence_refs].sort(),
+            note: r.note,
+          }))
+          .sort((a, b) => a.coverage_id.localeCompare(b.coverage_id))
       : null,
   });
 }

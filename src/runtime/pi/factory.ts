@@ -421,6 +421,34 @@ export class PiWorker implements WorkerRuntime {
             ),
           }
         : {};
+    // Assessment primaries may attach explicit per-obligation test results.
+    let isAssessment = false;
+    try {
+      isAssessment = this.deps.storage.getCampaign(lease.campaign_id).spec.mode === "assessment";
+    } catch {
+      isAssessment = false;
+    }
+    const coverageField: TProperties =
+      source === "primary" && isAssessment
+        ? {
+            coverage_result: Type.Optional(
+              Type.Array(
+                Type.Object({
+                  coverage_id: Type.String(),
+                  outcome: Type.Union([
+                    Type.Literal("no_issue_observed"),
+                    Type.Literal("suspected"),
+                    Type.Literal("confirmed"),
+                    Type.Literal("inconclusive"),
+                  ]),
+                  evidence_refs: Type.Array(Type.String()),
+                  note: Type.String(),
+                }),
+                { maxItems: 8 },
+              ),
+            ),
+          }
+        : {};
     return tool(
       "finish_step",
       "Required: end this execute fragment and free the slot. Call after progress, failure, truncated output, or cap. Checkpoint alone does not finish.",
@@ -456,6 +484,7 @@ export class PiWorker implements WorkerRuntime {
           ),
           next_action: Type.Optional(Type.String()),
           ...verificationField,
+          ...coverageField,
         },
         { additionalProperties: false },
       ),

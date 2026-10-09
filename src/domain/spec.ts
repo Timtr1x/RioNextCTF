@@ -117,16 +117,28 @@ export function validateCampaignSpec(input: unknown): CampaignSpec {
       allow_model_fallback: Boolean(model_policy_raw.allow_model_fallback),
     },
     budget,
-    verification_policy: {
-      require_independent_verify: Boolean(
-        (requireObject(raw, "verification_policy") as Record<string, unknown>).require_independent_verify,
-      ),
-      oracle_id: optionalString(requireObject(raw, "verification_policy"), "oracle_id") ?? "synthetic-oracle",
-    },
-    coverage_policy: {
-      dimensions: stringArray(requireObject(raw, "coverage_policy"), "dimensions"),
-      mandatory_ids: stringArray(requireObject(raw, "coverage_policy"), "mandatory_ids"),
-    },
+    verification_policy: (() => {
+      const vp = requireObject(raw, "verification_policy");
+      const policy: CampaignSpec["verification_policy"] = {
+        require_independent_verify: Boolean(vp.require_independent_verify),
+        oracle_id: optionalString(vp, "oracle_id") ?? "synthetic-oracle",
+      };
+      if (typeof vp.require_confirmed_findings === "boolean") {
+        policy.require_confirmed_findings = vp.require_confirmed_findings;
+      }
+      return policy;
+    })(),
+    coverage_policy: (() => {
+      const cp = requireObject(raw, "coverage_policy");
+      const policy: CampaignSpec["coverage_policy"] = {
+        dimensions: stringArray(cp, "dimensions"),
+        mandatory_ids: stringArray(cp, "mandatory_ids"),
+      };
+      if (typeof cp.require_complete === "boolean") {
+        policy.require_complete = cp.require_complete;
+      }
+      return policy;
+    })(),
     artifact_policy: {
       max_bytes: optionalIntOrNull(requireObject(raw, "artifact_policy"), "max_bytes") ?? 1_000_000,
       retention_days: optionalIntOrNull(requireObject(raw, "artifact_policy"), "retention_days") ?? 30,

@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { DomainError } from "../../src/domain/errors.ts";
 import { makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { Engine } from "../../src/controller/engine.ts";
-import { loadDemoSpec } from "../../src/eval/helpers.ts";
+import { loadAssessmentSpec, loadDemoSpec } from "../../src/eval/helpers.ts";
 import { ArtifactStore } from "../../src/storage/artifacts.ts";
 import { Store } from "../../src/storage/db.ts";
 import { StorageService } from "../../src/storage/service.ts";
@@ -455,10 +455,10 @@ test("F25 identical submission_id replays; different payload cannot overwrite", 
   e.close();
 });
 
-test("F36 recovered resolved execute projects coverage", async () => {
+test("F36 recovered resolved execute applies explicit coverage results only", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rn-f36-"));
   const e = open(dir);
-  const spec = loadDemoSpec("f36");
+  const spec = loadAssessmentSpec("f36");
   e.createCampaign(spec);
   const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
@@ -491,6 +491,9 @@ test("F36 recovered resolved execute projects coverage", async () => {
     finish_requested: true,
     protocol_error: null,
   });
+  const covId = String(
+    e.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk")!.id,
+  );
   const art = await e.storage.putArtifact(spec.campaign_id, "desk-raw", "text/plain", decide.run_id);
   const obs = e.storage.recordObservation({
     campaign_id: spec.campaign_id,
@@ -505,7 +508,8 @@ test("F36 recovered resolved execute projects coverage", async () => {
     env_rev: "env-1",
   });
   const claimed = e.storage.claimNextStep(spec.campaign_id, "t", 1)!;
-  const submitted = e.storage.submitRunOutcome({
+  // a resolved run without an explicit coverage_result marks nothing
+  const plain = e.storage.submitRunOutcome({
     campaign_id: spec.campaign_id,
     run_id: claimed.run_id,
     fence: claimed.fence,
@@ -520,14 +524,41 @@ test("F36 recovered resolved execute projects coverage", async () => {
     finding_ids: [],
     source: "primary",
   });
-  assert.equal(submitted.accepted, true);
+  assert.equal(plain.accepted, true);
   e.close();
   const e2 = open(dir);
   e2.storage.recoverStaleRuns(spec.campaign_id);
-  const run = e2.storage.getRun(claimed.run_id);
+  let run = e2.storage.getRun(claimed.run_id);
   assert.equal(run.end_reason, "resolved");
-  const cov = e2.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk");
+  let cov = e2.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk");
+  assert.notEqual(cov?.execution_state, "tested", "no auto projection from resolved+artifact");
+
+  // now a finish carrying an explicit result marks exactly that item
+  e2.storage.store.db.prepare("UPDATE steps SET status = 'ready' WHERE fingerprint = 'f36-fp'").run();
+  const claimed2 = e2.storage.claimNextStep(spec.campaign_id, "t", e2.storage.getCampaign(spec.campaign_id).epoch)!;
+  const withResult = e2.storage.submitRunOutcome({
+    campaign_id: spec.campaign_id,
+    run_id: claimed2.run_id,
+    fence: claimed2.fence,
+    submission_id: "f36-sub2",
+    payload: {
+      disposition: "resolved",
+      summary: "tested the desk",
+      evidence_refs: [obs.canonical_ids.observation_id!],
+      coverage_result: [
+        { coverage_id: covId, outcome: "no_issue_observed", evidence_refs: [obs.canonical_ids.observation_id!], note: "looked, nothing there" },
+      ],
+    },
+    observation_ids: [obs.canonical_ids.observation_id!],
+    fact_ids: [],
+    finding_ids: [],
+    source: "primary",
+  });
+  assert.equal(withResult.accepted, true);
+  e2.storage.finishRun(spec.campaign_id, claimed2.run_id, withResult.outcome!);
+  cov = e2.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk");
   assert.equal(cov?.execution_state, "tested");
+  assert.equal(cov?.outcome, "no_issue_observed");
   e2.close();
 });
 

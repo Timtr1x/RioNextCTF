@@ -146,9 +146,20 @@ export interface VerificationResult {
   rationale: string;
 }
 
+/** Assessment-only: an explicit per-obligation test result at finish time. */
+export interface CoverageResultItem {
+  coverage_id: string;
+  outcome: "no_issue_observed" | "suspected" | "confirmed" | "inconclusive";
+  evidence_refs: string[];
+  note: string;
+}
+
 export interface CoveragePolicy {
   dimensions: string[];
   mandatory_ids: string[];
+  /** Strict coverage gate for assessments. Absent on old specs means:
+   *  assessment → true, goal_seeking → false (normalized at read time). */
+  require_complete?: boolean;
 }
 
 export interface ArtifactPolicy {
@@ -262,6 +273,8 @@ export interface TaskOutcome {
   protocol_error: string | null;
   /** Present on verify runs whose primary submitted an explicit verdict. */
   verification_result?: VerificationResult | null;
+  /** Assessment runs only: explicit per-obligation results. */
+  coverage_result?: CoverageResultItem[] | null;
 }
 
 export interface DomainEvent {

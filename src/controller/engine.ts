@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { RuntimeConfig } from "../contracts/config.ts";
 import { configFingerprint, makeRuntimeConfig, printStartupBanner, validateStartupInput } from "../contracts/config.ts";
 import { buildContextPack } from "../context/builder.ts";
-import { evaluateCompletion, goalFactCanSatisfy, requiresIndependentGoalVerification, type CompletionSnapshot, type CoverageRow } from "../domain/completion.ts";
+import { evaluateCompletion, completeCoverageRequired, confirmedFindingsRequired, goalFactCanSatisfy, requiresIndependentGoalVerification, type CompletionSnapshot, type CoverageRow } from "../domain/completion.ts";
 import { DomainError } from "../domain/errors.ts";
 import type { CampaignSpec, CampaignState, RunLease, TaskOutcome } from "../domain/types.ts";
 import { decideChooser, executeChooser } from "../eval/demo-policy.ts";
@@ -593,7 +593,9 @@ export class Engine {
       // Pending planner-relevant input, not audit noise: bookkeeping events
       // (decision.committed, run.finished, heartbeats) never set this.
       pending_decision: camp.requested_seq > camp.reviewed_seq,
-      pending_important_proposals: pendingImportant(this.storage, campaignId),
+      pending_important_proposals: pendingImportant(this.storage, campaignId, confirmedFindingsRequired(camp.spec.mode, camp.spec.verification_policy.require_confirmed_findings)),
+      require_confirmed_findings: confirmedFindingsRequired(camp.spec.mode, camp.spec.verification_policy.require_confirmed_findings),
+      require_complete: completeCoverageRequired(camp.spec.mode, camp.spec.coverage_policy.require_complete),
       uncertain_invocations: this.invocations
         .nonTerminal(campaignId)
         .filter((i) => i.state === "uncertain").length,
@@ -769,13 +771,15 @@ function tryLiveCatalog(
   }
 }
 
-function pendingImportant(storage: StorageService, campaignId: string): number {
+function pendingImportant(storage: StorageService, campaignId: string, countPendingFindings: boolean): number {
   const uncommitted = Number(
     (storage.store.db.prepare("SELECT COUNT(*) AS c FROM decision_runs WHERE campaign_id = ? AND committed = 0").get(campaignId) as { c: number }).c,
   );
+  // candidate findings only gate delivery when the task requires confirmed ones
+  if (!countPendingFindings) return uncommitted;
   const pendingFindings = Number(
     (storage.store.db
-      .prepare("SELECT COUNT(*) AS c FROM findings WHERE campaign_id = ? AND status IN ('suspected','validating')")
+      .prepare("SELECT COUNT(*) AS c FROM findings WHERE campaign_id = ? AND status IN ('suspected','validating','inconclusive','stale')")
       .get(campaignId) as { c: number }).c,
   );
   return uncommitted + pendingFindings;

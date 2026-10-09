@@ -1347,28 +1347,71 @@ export class StorageService {
 
   projectExecuteOutcome(campaignId: string, run: Record<string, unknown>, outcome: TaskOutcome): void {
     if (run.mode !== "execute") return;
-    if (outcome.reason !== "resolved") return;
-    if (String(run.kind) === "verify") {
+    if (String(run.kind) === "verify" && outcome.reason === "resolved") {
       // A verify run only affects the finding/finding-candidate it explicitly
       // names, and only through an explicit model verdict. "Run resolved" plus
       // "some artifact exists" no longer confirms anything.
       const vr = outcome.verification_result;
       if (vr) this.applyTargetedVerification(campaignId, run, vr);
     }
-    const stepId = run.step_id ? String(run.step_id) : outcome.step_id;
-    if (!stepId) return;
-    const step = this.store.db.prepare("SELECT method_family FROM steps WHERE id = ?").get(stepId) as
-      | { method_family: string }
-      | undefined;
-    if (!step?.method_family) return;
-    const arts = Number(
-      (this.store.db.prepare("SELECT COUNT(*) AS c FROM artifacts WHERE campaign_id = ?").get(campaignId) as { c: number }).c,
-    );
-    this.updateCoverage(campaignId, step.method_family, {
-      execution_state: "tested",
-      outcome: "no_issue_observed",
-      evidence_state: arts > 0 ? "current" : "missing",
-    });
+    // Coverage moves only through explicit per-obligation results, never by
+    // "this step resolved and the campaign has artifacts".
+    if (outcome.coverage_result && outcome.coverage_result.length > 0) {
+      this.applyCoverageResults(campaignId, run, outcome.coverage_result);
+    }
+  }
+
+  /** Explicit per-obligation test results from an assessment run's finish. */
+  private applyCoverageResults(
+    campaignId: string,
+    run: Record<string, unknown>,
+    results: { coverage_id: string; outcome: string; evidence_refs: string[]; note: string }[],
+  ): void {
+    const reject = (coverageId: string, reason: string): void => {
+      this.appendEvent(
+        campaignId,
+        "coverage.result_rejected",
+        { run_id: String(run.id), coverage_id: coverageId, reason },
+        { kind: "controller", id: "coverage" },
+        coverageId,
+      );
+    };
+    if (this.getCampaign(campaignId).spec.mode !== "assessment") {
+      for (const r of results) reject(r.coverage_id, "not_assessment");
+      return;
+    }
+    for (const r of results.slice(0, 8)) {
+      const item = this.store.db
+        .prepare("SELECT id, obligation FROM coverage_items WHERE id = ? AND campaign_id = ?")
+        .get(r.coverage_id, campaignId) as { id: string; obligation: string } | undefined;
+      if (!item) {
+        reject(r.coverage_id, "unknown_coverage_id");
+        continue;
+      }
+      let refsOk = false;
+      try {
+        refsOk = r.evidence_refs.length > 0 && this.refsExist(campaignId, r.evidence_refs);
+      } catch {
+        refsOk = false;
+      }
+      if (!refsOk) {
+        reject(r.coverage_id, "missing_evidence");
+        continue;
+      }
+      const outcome = r.outcome as "no_issue_observed" | "suspected" | "confirmed" | "inconclusive";
+      this.updateCoverageById(campaignId, item.id, {
+        execution_state: "tested",
+        outcome,
+        evidence_state: "current",
+      });
+      this.appendEvent(
+        campaignId,
+        "coverage.result_applied",
+        { run_id: String(run.id), coverage_id: item.id, obligation: item.obligation, outcome, note: r.note.slice(0, 400) },
+        { kind: "controller", id: "coverage" },
+        item.id,
+      );
+    }
   }
 
   /**
@@ -1508,17 +1551,22 @@ export class StorageService {
         );
         return { accepted: false, duplicate: false, conflict: false, outcome: null, error: parsed.error };
       }
-      if (args.source === "finalizer" && parsed.value.verification_result) {
-        // Finalize ends a fragment; it never mints a first-time verdict.
+      if (args.source === "finalizer" && (parsed.value.verification_result || (parsed.value.coverage_result?.length ?? 0) > 0)) {
+        // Finalize ends a fragment; it never mints first-time verdicts or coverage conclusions.
         this.appendEvent(
           args.campaign_id,
           "verification.dropped_finalizer",
-          { run_id: args.run_id, target_id: parsed.value.verification_result.target_id },
+          {
+            run_id: args.run_id,
+            target_id: parsed.value.verification_result?.target_id ?? null,
+            coverage_items: parsed.value.coverage_result?.length ?? 0,
+          },
           { kind: "controller", id: "verify" },
           args.run_id,
           args.submission_id,
         );
         parsed.value.verification_result = undefined;
+        parsed.value.coverage_result = undefined;
       }
       const evidenceErr = this.validateFinishEvidence(args.campaign_id, args.run_id, parsed.value);
       if (evidenceErr) {
@@ -1742,6 +1790,7 @@ export class StorageService {
       finish_requested: true,
       protocol_error: null,
       verification_result: payload.verification_result ?? null,
+      coverage_result: payload.coverage_result ?? null,
     };
   }
 
@@ -2072,6 +2121,24 @@ export class StorageService {
     const deferred = (this.store.db.prepare("SELECT COUNT(*) AS c FROM steps WHERE campaign_id = ? AND status = 'deferred'").get(campaignId) as { c: number }).c;
     const running = (this.store.db.prepare("SELECT COUNT(*) AS c FROM steps WHERE campaign_id = ? AND status IN ('leased','running')").get(campaignId) as { c: number }).c;
     return { ready: Number(ready), blocked: Number(blocked), deferred: Number(deferred), running: Number(running), frontier: Number(ready) + Number(blocked) + Number(deferred) + Number(running) };
+  }
+
+  /** Same patch semantics as updateCoverage but keyed by coverage item id. */
+  updateCoverageById(
+    campaignId: string,
+    coverageId: string,
+    patch: Partial<{
+      execution_state: CoverageExecutionState;
+      outcome: CoverageOutcome;
+      evidence_state: CoverageEvidenceState;
+      applicability: CoverageApplicability;
+    }>,
+  ): void {
+    const row = this.store.db
+      .prepare("SELECT id, obligation FROM coverage_items WHERE id = ? AND campaign_id = ?")
+      .get(coverageId, campaignId) as { id: string; obligation: string } | undefined;
+    if (!row) return;
+    this.updateCoverage(campaignId, row.obligation, patch);
   }
 
   updateCoverage(
