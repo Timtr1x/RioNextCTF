@@ -635,6 +635,15 @@ test("T24 confirmed finding does not complete assessment with untested coverage"
     finish_requested: true,
     protocol_error: null,
   });
+  // the seeded input has been reviewed, otherwise pending_decision blocks first
+  e.storage.applyProposalBatch({
+    campaign_id: spec.campaign_id,
+    producer_id: "t",
+    submission_id: "t24-review",
+    run_id: run.run_id,
+    operations: [],
+    reviewed_through_seq: e.storage.getCampaign(spec.campaign_id).event_head,
+  });
   e.storage.consumeEvents(spec.campaign_id);
   const finding = e.storage.list("findings", spec.campaign_id)[0]!;
   assert.equal(finding.status, "confirmed");

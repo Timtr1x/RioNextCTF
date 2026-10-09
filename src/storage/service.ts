@@ -740,6 +740,8 @@ export class StorageService {
     env_rev: string;
     identity_ref?: string;
     skip_progress?: boolean;
+    /** Internal: raw tool dumps pass false; the fragment end requests review once. */
+    request_review?: boolean;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, () => {
       this.assertRun(args.campaign_id, args.run_id);
@@ -777,7 +779,7 @@ export class StorageService {
           asJson(args.body),
         );
       if (!args.skip_progress) this.bumpProgress(args.campaign_id);
-      this.markRequested(args.campaign_id, seq);
+      if (args.request_review !== false) this.markRequested(args.campaign_id, seq);
       return { status: "ok", canonical_ids: { observation_id: id }, seq };
     });
   }
@@ -1063,6 +1065,9 @@ export class StorageService {
     operations: unknown;
     no_change_reason?: string;
     read_set?: ReadSetEntry[];
+    /** Internal: the graph snapshot the Decide run actually saw (H). The model
+     *  never sends this; the worker fills it from the context manifest. */
+    reviewed_through_seq?: number;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, () => {
       const camp = this.getCampaign(args.campaign_id);
@@ -1076,6 +1081,9 @@ export class StorageService {
           });
         }
       }
+      // Only confirm what the model could actually have read. Inputs that
+      // arrived during the run (seq > H) stay unreviewed and retrigger Decide.
+      const H = Math.max(camp.reviewed_seq, args.reviewed_through_seq ?? camp.event_head);
       const readSetJson = asJson(args.read_set ?? []);
       const ops = parseProposalOps(args.operations);
       if (ops.length === 0) {
@@ -1084,10 +1092,13 @@ export class StorageService {
           .prepare(
             "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, ?, '[]', 1, ?, ?, ?)",
           )
-          .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, seq, args.no_change_reason ?? "no_change", nowIso());
+          .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, H, args.no_change_reason ?? "no_change", nowIso());
+        // A no_change with a live frontier means "the plan still fits", not
+        // "the search is idle" — only an empty frontier spends review budget.
+        const frontierEmpty = this.counts(args.campaign_id).frontier === 0;
         this.store.db
-          .prepare("UPDATE campaigns SET reviewed_seq = ?, empty_reviews = empty_reviews + 1, updated_at = ? WHERE id = ?")
-          .run(seq, nowIso(), args.campaign_id);
+          .prepare("UPDATE campaigns SET reviewed_seq = MAX(reviewed_seq, ?), empty_reviews = empty_reviews + ?, updated_at = ? WHERE id = ?")
+          .run(H, frontierEmpty ? 1 : 0, nowIso(), args.campaign_id);
         return { status: "ok", canonical_ids: {}, seq, extra: { no_change: true } };
       }
       const ids: Record<string, string> = {};
@@ -1103,15 +1114,15 @@ export class StorageService {
         .prepare(
           "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, NULL, ?)",
         )
-        .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, asJson(ops), this.getCampaign(args.campaign_id).requested_seq, nowIso());
+        .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, asJson(ops), H, nowIso());
       if (material) {
         this.store.db
-          .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, empty_reviews = 0, updated_at = ? WHERE id = ?")
-          .run(nowIso(), args.campaign_id);
+          .prepare("UPDATE campaigns SET reviewed_seq = MAX(reviewed_seq, ?), empty_reviews = 0, updated_at = ? WHERE id = ?")
+          .run(H, nowIso(), args.campaign_id);
       } else {
         this.store.db
-          .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, updated_at = ? WHERE id = ?")
-          .run(nowIso(), args.campaign_id);
+          .prepare("UPDATE campaigns SET reviewed_seq = MAX(reviewed_seq, ?), updated_at = ? WHERE id = ?")
+          .run(H, nowIso(), args.campaign_id);
       }
       this.appendEvent(args.campaign_id, "decision.committed", { ops: ops.map((o) => o.op) }, { kind: "worker", id: args.run_id });
       return { status: "ok", canonical_ids: ids, seq };

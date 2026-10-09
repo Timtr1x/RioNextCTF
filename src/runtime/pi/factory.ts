@@ -257,6 +257,7 @@ export class PiWorker implements WorkerRuntime {
               (this.deps.storage.getWorld<LabWorld>(lease.campaign_id, { env_rev: "env-1" } as LabWorld) as LabWorld).env_rev ?? "env-1",
             ),
             skip_progress: true,
+            request_review: false,
           });
         }
         if (
@@ -594,6 +595,7 @@ export class PiWorker implements WorkerRuntime {
               operations: p.operations,
               no_change_reason: p.no_change_reason,
               read_set: context.manifest.selected_entity_revisions,
+              reviewed_through_seq: context.manifest.graph_snapshot_seq,
             });
             return ok(result);
           } catch (err) {

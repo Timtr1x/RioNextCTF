@@ -24,6 +24,8 @@ export interface CompletionSnapshot {
   blocked_steps: number;
   frontier_size: number;
   new_observation_since_progress: boolean;
+  /** Planner-relevant input not yet reviewed (requested_seq > reviewed_seq). */
+  pending_decision?: boolean;
   findings: { status: FindingStatus }[];
   coverage: CoverageRow[];
   root_goal_satisfied: boolean;
@@ -70,8 +72,12 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
   if (snap.state === "awaiting_verify") {
     return { canClose: false, suggestedState: "awaiting_verify", blockers: ["human_goal_verify"] };
   }
-  if (snap.unconsumed_events > 0) {
-    blockers.push("unconsumed_events");
+  // Planner-relevant input waits for a Decide review. Audit-style events alone
+  // (bookkeeping, heartbeats) never block completion; legacy callers that only
+  // count unconsumed events fall back to the old semantics.
+  const pendingDecision = snap.pending_decision ?? snap.unconsumed_events > 0;
+  if (pendingDecision) {
+    blockers.push("pending_decision");
     return { canClose: false, suggestedState: "active", blockers };
   }
   if (snap.pending_important_proposals > 0) {

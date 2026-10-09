@@ -377,10 +377,9 @@ export class Engine {
         break;
       }
       const counts = this.storage.counts(campaignId);
-      const needDecide =
-        (camp.requested_seq > camp.reviewed_seq && counts.ready === 0) ||
-        counts.ready + counts.blocked + counts.deferred === 0 ||
-        i === 0;
+      // New input requests a review even while ready steps exist: Execute works
+      // the current fragment, Decide re-plans at the next boundary.
+      const needDecide = camp.requested_seq > camp.reviewed_seq || counts.ready + counts.blocked + counts.deferred === 0 || i === 0;
       const decideLock = this.storage.store.db.prepare("SELECT decide_lock_owner FROM campaigns WHERE id = ?").get(campaignId) as {
         decide_lock_owner: string | null;
       };
@@ -396,10 +395,18 @@ export class Engine {
         camp.state !== "budget_paused" &&
         (camp.requested_seq > decideAttemptedFor || canRetryEmptyReview)
       ) {
+        // Failure dedupe remembers the pre-run request watermark R: the same R
+        // never retries immediately, new input (requested > R) re-enables it.
+        // A commit advances reviewed_seq (to H); then the persisted seqs decide
+        // what happens next, so inputs that arrived mid-run are never swallowed.
+        const requestWatermark = camp.requested_seq;
+        const reviewedBefore = camp.reviewed_seq;
         const decided = await this.runDecide(campaignId);
         ranDecide = Boolean(decided);
         lastDecideResolved = decided?.reason === "resolved";
-        decideAttemptedFor = this.storage.getCampaign(campaignId).requested_seq;
+        const after = this.storage.getCampaign(campaignId);
+        const advanced = after.reviewed_seq > reviewedBefore || after.reviewed_seq >= after.requested_seq;
+        decideAttemptedFor = advanced ? -1 : requestWatermark;
       }
       const afterDecide = this.storage.getCampaign(campaignId);
       if (afterDecide.state === "cancelled") break;
@@ -583,6 +590,9 @@ export class Engine {
       in_flight_runs: inFlightRuns,
       in_flight_invocations: inFlightInv,
       unconsumed_events: this.storage.unconsumedCount(campaignId),
+      // Pending planner-relevant input, not audit noise: bookkeeping events
+      // (decision.committed, run.finished, heartbeats) never set this.
+      pending_decision: camp.requested_seq > camp.reviewed_seq,
       pending_important_proposals: pendingImportant(this.storage, campaignId),
       uncertain_invocations: this.invocations
         .nonTerminal(campaignId)
