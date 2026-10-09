@@ -79,6 +79,7 @@ export function CampaignDetail({ id }: { id: string }): JSX.Element {
             </h2>
             <div className="mini mt">
               {kindLabel(view.spec)} · {targetLabel(view.spec)} · thinking 见 spec · solver {view.spec.model?.model ?? "scripted"}
+              {view.spec.capabilities?.length ? ` · 工具能力 ${view.spec.capabilities.join("+")}` : ""}
             </div>
           </div>
           <div className="flex">

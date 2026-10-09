@@ -386,6 +386,7 @@ function TriageCard({ t }: { t: TriagePreview }): JSX.Element {
         <Tag>seed {t.triage.seed_method_family}</Tag>
         {t.triage.skill_pack ? <Tag>skill {t.triage.skill_pack}</Tag> : null}
         {t.detected !== t.triage.kind ? <Tag tone="warn">detected {t.detected} → 覆盖 {t.triage.kind}</Tag> : null}
+        {t.capabilities?.length ? <Tag tone="ok">工具能力 {t.capabilities.join("+")}（分类只是建议，两类都可用）</Tag> : null}
       </div>
       {(t.triage.evidence ?? []).slice(0, 6).map((e, i) => (
         <div className="evi" key={i}>

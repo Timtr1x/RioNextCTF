@@ -48,6 +48,8 @@ export interface SpecSummary {
   mode: string;
   statement: string;
   assets: string[];
+  capabilities?: string[];
+  capabilities_reason?: string[];
   challenge: { kind?: string; overlay?: string | null; confidence?: string; seed_method_family?: string } | null;
   budget: { max_calls?: number; max_tokens?: number; max_cost_micro?: number; deadline_ms?: number } | null;
   model: { provider: string; model: string } | null;
@@ -193,6 +195,7 @@ export interface TriagePreview {
   sha256: string;
   detected: string;
   triage: TriageResult;
+  capabilities?: string[];
 }
 
 export interface KaliStatus {

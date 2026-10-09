@@ -48,9 +48,10 @@ export function Review(): JSX.Element {
       <div className="card mt">
         <h3>人审规则</h3>
         <div className="mini">
-          goal_seeking 且 success_predicate 不是合成 sample_recovered 时，模型交 flag_recovered 只算候选，战役停在
-          awaiting_verify。accept 才关战役；reject 的原因作为 hint 写回上下文，被驳回的 flag 置 disputed/stale，同一值不许再提；--continue
-          立刻续跑。
+          goal_seeking 且 verification_policy.require_independent_verify=true（CTF 默认）时，模型交 flag_recovered 只算候选，战役停在
+          awaiting_verify。accept 是人工外部验收，才关战役；reject 的原因作为 hint 写回上下文，被驳回的 flag 置
+          disputed/stale，同一值不许再提；--continue 立刻续跑。比赛模式下 accept 由平台判题触发。observed-only
+          任务（require_independent_verify=false）不在这里停靠：报告会注明"依据已有观察完成，未独立验收"。
         </div>
       </div>
     </>

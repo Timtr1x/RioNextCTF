@@ -1,0 +1,60 @@
+{
+  "campaign_id": "camp_bounded_assessment_example",
+  "schema_version": 1,
+  "mode": "assessment",
+  "root_goal": {
+    "statement": "对指定授权站点进行有界安全探索，优先检查未登录的数据访问和备份泄露，保存证据并报告发现、候选、反证和未覆盖部分。",
+    "success_predicate_ref": "assessment_complete"
+  },
+  "scope": {
+    "assets": ["authorized-target.example", "http://authorized-target.example/"],
+    "workspace": "kali",
+    "identities": ["operator"],
+    "entries": ["http://authorized-target.example/"],
+    "exclusions": [],
+    "profile": "kali-lab"
+  },
+  "policy_version": "p-assessment-1",
+  "scope_version": "s-assessment-1",
+  "goal_version": "g-assessment-1",
+  "tool_allowlist": [
+    "graph_query", "artifact_read", "submit_observation", "submit_fact",
+    "submit_finding", "propose_plan", "propose_step", "checkpoint",
+    "finish_step", "finish_decision", "kali_run", "kali_write", "playwright"
+  ],
+  "execution_profile": "kali",
+  "model_policy": {
+    "provider": "prv_replace_with_configured_provider",
+    "model": "replace_with_configured_model",
+    "thinking_level": "max",
+    "allow_retry": false,
+    "allow_model_fallback": false
+  },
+  "budget": {
+    "currency": "USD",
+    "price_version": "unknown",
+    "max_cost_micro": null,
+    "max_tokens": 120000000,
+    "max_calls": 3000,
+    "deadline_ms": null
+  },
+  "verification_policy": {
+    "require_independent_verify": false,
+    "require_confirmed_findings": false,
+    "oracle_id": "none"
+  },
+  "coverage_policy": {
+    "dimensions": ["asset", "method"],
+    "mandatory_ids": ["unauthenticated-backup-access"],
+    "require_complete": false
+  },
+  "artifact_policy": {
+    "max_bytes": 2000000,
+    "retention_days": 7
+  },
+  "stop_policy": {
+    "max_empty_reviews_per_progress_epoch": 6,
+    "decide_debounce_ms": 0
+  },
+  "environment_revision": "env-1"
+}

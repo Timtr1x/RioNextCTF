@@ -74,9 +74,11 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 .\rionext.cmd run --input-url https://ctf.example/files/task.zip
 ```
 
-`--input` 把文件/目录复制进战役工作区（`.rionext/workspace/<id>/input/original`，附 SHA-256 清单），在宿主机做确定性分诊（magic bytes / ELF / PE / ZIP 目录，不执行样本），按题型选二进制白名单，并给 Execute 注入对应的短 skill（`prompts/skills/`）。`--kind auto|reverse|pwn|misc|crypto|generic` 显式覆盖分诊；`--endpoint` 只接受 `tcp://host:port`；`--web-url` 接受 `http(s)://...`，给"发源码的 web 题"用，靶机地址进 scope 和题面，agent 先读源码再打 live 靶机。`--input-url` 先在宿主机下载附件（浏览器 UA、120s 超时、256MB 上限），之后和 `--input` 完全同路，同一链接再跑 resume 同一战役。`--input`/`--input-url` 互相排斥，也都不能和 `--url`/`--spec` 同用。Web 战役的 prompt、工具 schema、白名单逐字节不变（`tests/contract/web-golden.test.ts` 锁定）。CTF 工具链在镜像的独立层，改了要重建：`npm run kali:build`。同一路径再跑会 resume 同一战役；想换 `--kind` 重判就换 `--id` 或删掉旧战役。
+`--input` 把文件/目录复制进战役工作区（`.rionext/workspace/<id>/input/original`，附 SHA-256 清单），在宿主机做确定性分诊（magic bytes / ELF / PE / ZIP 目录，不执行样本），并给 Execute 注入对应的参考 skill（`prompts/skills/`，是可跳步的参考不是固定流程）。工具准入不按题型：战役解析出能力组合——有附件记录就是 `ctf`（二进制/Misc/Crypto 工具加 curl/wget 全可用），scope 里有 http(s) 入口或合法 `challenge.web_url` 再加 `web`（nmap/sqlmap/nuclei 等）；分类错了不挡工具，`--kind` 只改推荐。`--endpoint` 只接受 `tcp://host:port`；`--web-url` 接受 `http(s)://...`，给"发源码的 web 题"用，靶机地址进 scope 和题面，源码和靶机都是证据来源，先后顺序 agent 自己定。`--input-url` 先在宿主机下载附件（浏览器 UA、120s 超时、256MB 上限），之后和 `--input` 完全同路，同一链接再跑 resume 同一战役。`--input`/`--input-url` 互相排斥，也都不能和 `--url`/`--spec` 同用。纯 Web 战役的工具 schema 和二进制集合逐字节锁定（`tests/contract/web-golden.test.ts`）。CTF 工具链在镜像的独立层，改了要重建：`npm run kali:build`。同一路径再跑会 resume 同一战役；想换 `--kind` 重判就换 `--id` 或删掉旧战役。
 
-`--url` 和 `--spec` 不能一起用。命中 `flag_recovered` 会停在 `awaiting_verify`：
+`--url` 和 `--spec` 不能一起用。`--url` 是 CTF 找 flag 入口；通用渗透/验证目标用 `--spec`，示例见 `profiles/general-goal.json`（观察即完成）和 `profiles/bounded-assessment.json`（有界评估，允许交付候选与未覆盖项）。
+
+命中 `flag_recovered` 会停在 `awaiting_verify`：
 
 ```
 .\rionext.cmd list
@@ -86,6 +88,16 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 ```
 
 只有一个战役时可以省略 id。
+
+## 验收策略与完成语义
+
+`verification_policy` / `coverage_policy` 控制战役怎么算完成：
+
+- `require_independent_verify`（CTF 默认 true）：根目标事实必须经人工/平台等外部验收才关战役。false 时观察证据即可收口，报告写明 `observed_only_not_independently_verified`，绝不标 verified。derived 推断在任何策略下都不能直接完成根目标。
+- `require_confirmed_findings`：缺省沿用旧严格度——assessment 为 true（suspected/validating/inconclusive/stale 的发现挡收口），goal_seeking 为 false（候选发现可交付，报告标状态）。显式 true 时根目标先满足也不能跳过发现验证。
+- `coverage_policy.require_complete`：缺省 assessment true / goal_seeking false。false 允许有界评估交付，覆盖缺口如实列出；true 时 mandatory 项必须 tested 或 waived。
+
+Finding 的确认只走定向验证：Decide 提 `request_verification` 生成绑定目标的 verify step，Execute 在该 step 的 finish_step 里给 `verification_result`（目标、verdict、本 run 内取得的新证据、理由）。没有 verdict 的 verify run 不确认任何东西；Finalize 永远不能首次下结论。评估任务的覆盖结论同样显式：assessment 的 finish_step 可带 `coverage_result`（最多 8 项，每项要有证据），不再存在"step resolved + 战役里有 artifact 就全绿"的投影。
 
 ## 战役 CLI
 

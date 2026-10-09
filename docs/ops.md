@@ -8,6 +8,12 @@ Windows 用仓库里的 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx r
 
 需要 Node >= 22.19.0。先 `npm install`，再 `npx tsc -p tsconfig.json`，CLI 读的是 `dist/`。
 
+## 能力组合与验收（2026-10 起）
+
+工具准入按任务能力而不是题型：有附件/挑战记录 → `ctf` 工具集合；scope 有 http(s) 入口或合法 challenge.web_url → 再加 `web` 集合。UI 战役详情和 /api/triage 都显示解析出的能力。分类（kind）只决定推荐阅读哪个 skill。
+
+验收语义：`require_independent_verify` 决定根目标是否要人工/平台验收（CTF 默认要）；`require_confirmed_findings` 和 `coverage_policy.require_complete` 控制发现与覆盖门槛，缺省时 assessment 严格、goal_seeking 宽松。Finding 确认只走 verify step 的显式 verification_result；覆盖结论只走 assessment finish 的显式 coverage_result。详见 docs/cairn-alignment.md 与 README「验收策略与完成语义」。
+
 ## 一次健康检查
 
 ```

@@ -283,6 +283,18 @@ async function triageBody(ctx: ApiContext): Promise<unknown> {
     sha256: manifest.sha256,
     detected: detected.kind,
     triage,
+    // the same capability resolution the runtime uses; attachments give ctf,
+    // a live web_url adds web on top
+    capabilities: resolveToolCapabilities({
+      execution_profile: "kali",
+      challenge: { kind: triage.kind, ...(source.webUrl ? { web_url: source.webUrl } : {}) },
+      scope: {
+        entries: [
+          ...(source.endpoint ? [`tcp://${source.endpoint.host}:${source.endpoint.port}`] : []),
+          ...(source.webUrl ? [source.webUrl] : []),
+        ],
+      },
+    }).capabilities,
   };
 }
 
