@@ -96,7 +96,7 @@ export function buildInputFlagSpec(args: {
   const webUrl = args.web_url ? parseTargetUrl(args.web_url).toString() : null;
   const webHost = webUrl ? new URL(webUrl).hostname : null;
   const webText = webUrl
-    ? ` A live web application for this challenge runs at ${webUrl} (reachable from inside the campaign container); the staged files are its source code or supporting material. Read the source first, then probe the live app.`
+    ? ` A live web application for this challenge runs at ${webUrl} (reachable from inside the campaign container); the staged files are its source code or supporting material. Source and live app are both evidence sources; pick whichever order the evidence favors.`
     : "";
   const statement =
     `Authorized ${label} challenge. Challenge files are staged at ${root}/input/original ` +

@@ -1,6 +1,6 @@
-本步处理未定型的挑战附件。先做一轮确定性侦察，按特异度收敛题型，再按对应流程走。
+本步处理未定型的挑战附件。建议先一轮确定性侦察、按特异度收敛题型；但侦察是建议不是强制流程，已有信息足够时直接进最有价值的方向。
 
-1. 侦察清单未跑完不得以"信息不足"结束：input/original 全量 file、text 通读、sha256sum 对照 manifest。
+1. 侦察清单：input/original 全量 file、text 通读、sha256sum 对照 manifest。做完仍无法定型时按第 5 条处理。
 2. 定型按特异度排序，先匹配最具体的特征，全不中才按文件大类走通用流程：
    - RSA/密文参数（n= e= c= 大整数、BEGIN PUBLIC KEY、密文脚本）→ ctf-crypto
    - 加密压缩包 → 先 7z l -slt 看 Method 分 ZipCrypto/AES，再进 ctf-misc 压缩包流程

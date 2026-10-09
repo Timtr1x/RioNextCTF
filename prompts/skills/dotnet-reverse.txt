@@ -1,4 +1,4 @@
-本步是 .NET 程序集逆向。v1 没有 ilspy/mono，只能静态还原。
+本步是 .NET 程序集逆向。v1 没有 ilspy/mono，只能静态还原。以下是参考方法，按证据选择、允许跳步；已有信息无需重复获取。
 
 1. 确认托管：file / objdump -x 看 PE 的 COM descriptor（CLR 头）；strings 出 mscorlib、_CorExeMain 佐证。无 CLR 头但有 System.Private.CoreLib 是 NativeAOT/IL2CPP，转 reverse-native 流程。
 2. strings -a -e l（UTF-16）经常直接出 flag、密钥、提示——.NET 字符串是 UTF-16 存的。

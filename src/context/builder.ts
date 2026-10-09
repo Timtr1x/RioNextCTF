@@ -51,6 +51,61 @@ export function loadSkill(file: string): string | null {
   return null;
 }
 
+/** Any prompt-tree file (briefs/, env index), same dual-base lookup. */
+function loadPromptFile(rel: string): string | null {
+  for (const base of [join(here, "../../../prompts"), join(process.cwd(), "prompts")]) {
+    try {
+      const text = readFileSync(join(base, rel), "utf8").trim();
+      if (text) return text;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+/**
+ * System prompt composition: generic mode prompt + task brief + (execute-only,
+ * kali-only) environment index. The brief is derived from contract fields, not
+ * from prompt text: assessment mode gets the assessment brief, a challenge
+ * record or flag_recovered predicate gets the CTF brief, anything else stays
+ * generic. The web brief rides on the resolved web capability. Domain skill
+ * references stay in the user payload (skill_pack), never in the system text.
+ */
+export function composeSystemPrompt(
+  mode: "decide" | "execute" | "finalize",
+  spec: {
+    mode: string;
+    execution_profile: string;
+    root_goal: { success_predicate_ref: string };
+    challenge?: { kind: string; web_url?: string };
+    scope: { entries: string[] };
+  },
+): string {
+  const base = loadPrompt(mode);
+  if (mode === "finalize") return base;
+  const parts = [base];
+  const briefRel =
+    spec.mode === "assessment"
+      ? "briefs/assessment.txt"
+      : spec.challenge || spec.root_goal.success_predicate_ref === "flag_recovered"
+        ? "briefs/ctf.txt"
+        : null;
+  if (briefRel) {
+    const brief = loadPromptFile(briefRel);
+    if (brief) parts.push(brief);
+  }
+  if (resolveToolCapabilities(spec).capabilities.includes("web")) {
+    const web = loadPromptFile("briefs/web.txt");
+    if (web) parts.push(web);
+  }
+  if (mode === "execute" && isKaliProfile(spec.execution_profile)) {
+    const env = loadPromptFile("env-kali.txt");
+    if (env) parts.push(env);
+  }
+  return parts.join("\n\n");
+}
+
 /**
  * Execute-only, kali-only, input-campaigns-only. The step's method_family picks
  * one skill file; the header lists the campaign's resolved capability set by
@@ -236,7 +291,7 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   const tool_names = allow.length ? baseNames.filter((n) => allow.includes(n)) : baseNames;
   return {
     manifest,
-    system_prompt: loadPrompt(lease.mode),
+    system_prompt: composeSystemPrompt(lease.mode, camp.spec),
     user_payload: payload,
     tool_names,
   };

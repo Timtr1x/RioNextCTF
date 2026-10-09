@@ -1,0 +1,8 @@
+Kali 环境索引：
+
+- kali_run 跑白名单二进制；kali_write 把脚本和 payload 写到 /workspace（不要写容器系统目录）；playwright 操作容器内持久 Chromium（goto/snapshot/click/type/press/screenshot/content；snapshot 返回 ref，click/type 用 ref 或 selector）。不要用宿主机浏览器。
+- kali_run 回模型的 stdout 预览约 50000 字节；truncated=true 时这不是完整输出，用返回的 artifact_id 和 next_offset 调 artifact_read 读下一段，直到 truncated=false。不要把预览当全文。
+- nmap、nuclei、katana、gobuster、ffuf、sqlmap 等扫描立即返回 execution_id，在容器里后台继续跑（上限 60 分钟）。不要轮询；保存进度后 finish_step，控制器会收结果。cat、bash、curl、python3 始终同步返回，timeout_ms 只是上限。
+- bash / sh / python3 可以跑 /workspace 下的脚本或 bash -c '...'。大段 payload 用 kali_write，避免 heredoc 转义。
+- 知识库：/opt/kb/INDEX.txt、/opt/kb/PayloadsAllTheThings、/opt/kb/HackTricks、/opt/kb/HackTricks-Cloud、/opt/kb/Vulnerability-Wiki-PoC（1Day PoC 按年/月归档）。nuclei 模板在 /opt/nuclei-templates，跑 nuclei 加 -duc -t /opt/nuclei-templates。HTTP 探测用 httpx-toolkit（不要用 python 的 httpx）。Impacket 命令形如 impacket-secretsdump。读知识库用 cat/head/ls/find/grep/rg。
+- 上下文包只带最近的观察；更早的用 graph_query entity=observations（默认从最早开始，offset 翻页）。

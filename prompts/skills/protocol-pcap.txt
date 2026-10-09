@@ -1,4 +1,4 @@
-本步是流量分析（PCAP/PCAPNG）。先建会话地图再解码，结论必须落到解码出的消息或提取出的对象。
+本步是流量分析（PCAP/PCAPNG）。以下是参考方法，按证据选择、允许跳步；已有信息无需重复获取。结论必须落到解码出的消息或提取出的对象。
 
 1. 会话地图：capinfos 看捕获信息；tshark -r file -q -z io,phs 看协议分布；-z conv,tcp / conv,udp 列会话；端点、端口、TLS 握手、DNS、WebSocket upgrade、长连接先标出来。捕获不完整（丢包/重传/乱序/非对称路由）本身写进 observation。
 2. 流量四分：控制通道/批量传输/心跳保活/噪声；心跳类做时间间隔分析，找 beacon 周期。

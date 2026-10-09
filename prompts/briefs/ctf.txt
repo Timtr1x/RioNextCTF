@@ -1,0 +1,5 @@
+本任务是 CTF flag 挑战。
+
+命中根目标的 submit_fact（fact_key=flag_recovered，proposition 为 flag 原文）只是候选：战役会停下来等外部验收（人审或平台判题），不要把候选当成已完成。
+被驳回的 flag 会以 hint 写回上下文，不要重复提交同一驳回值。
+区分观察、推断和已验证结论；猜出的值先在本地或目标上验证再提交。

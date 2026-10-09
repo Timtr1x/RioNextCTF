@@ -1,4 +1,4 @@
-本步是 Misc（隐写/取证/杂项）。按固定顺序过一遍，每一步记录命令和结果，别跳步。
+本步是 Misc（隐写/取证/杂项）。以下是可选检查面参考，按证据选择、允许跳步；已有信息无需重复获取。
 
 1. 清单：对照 manifest 的 sha256；file、exiftool 全量元数据（注释、相机型号、缩略图都可能藏东西）。
 2. 容器真值：声明格式 vs 实际结构——pngcheck -v 看块、xxd 看头尾，专抓 polyglot、尾部附加数据（IEND/EOCD 之后）、畸形 trailer；binwalk 先看签名再 -e 提取。
@@ -9,4 +9,4 @@
 7. 固件：binwalk -E 读熵（0–0.3 填充、0.3–0.7 代码、0.7–0.95 压缩、0.95+ 加密或高熵压缩——高熵≠加密）；提取失败按序兜底：binwalk -eM 递归 → xxd|grep 搜 hsqs/sqsh 和 1f 8b 08 → binwalk --offset 256/4096 → dd 按熵分段切片单独 file+binwalk。rootfs 提出后立即做六件事：etc/inittab 与 init.d/rcS、grep -rE "(password|passwd|secret|token|api_key)="、find httpd/cgi-bin、find telnetd/dropbear、etc/passwd 与 shadow、strings busybox 看 banner。
 8. 磁盘/内存镜像：用 strings、binwalk 手工提文件；取证时间线先挑锚点事件（首次执行/登录/会话），事件关联靠 PID/路径等标识符，不靠时间戳接近。
 
-簿记：每层提取单独存盘并标注产物类型（明文/另一层容器/压缩/密文）；派生文件记录来源命令并重新过一遍定型；隐写工具一把梭不出结果就换思路看元数据和容器结构，不要无限调参；候选 flag 按题面格式校验后再提交。负证据也写 observation；连续 3 次工具调用没有新观察就写下当前假设换方向；checkpoint 只写增量。
+簿记：每层提取单独存盘并标注产物类型（明文/另一层容器/压缩/密文）；派生文件记录来源命令并重新过一遍定型；隐写工具一把梭不出结果就换思路看元数据和容器结构，不要无限调参；候选 flag 按题面格式校验后再提交。负证据也写 observation；连续多次工具调用都没有新信息时，写下当前假设换方向；checkpoint 只写增量。

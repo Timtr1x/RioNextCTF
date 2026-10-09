@@ -1,4 +1,4 @@
-本步是 APK 逆向。v1 镜像没有 apktool/jadx，走手工路线。
+本步是 APK 逆向。v1 镜像没有 apktool/jadx，走手工路线。以下是参考方法，按证据选择、允许跳步；已有信息无需重复获取。
 
 1. unzip -l 看结构；把 APK 复制到 /workspace/work 再解（input/original 只读）：unzip -d work/apk app.apk。
 2. AndroidManifest.xml 是二进制 XML：strings 提取包名、activity、权限、硬编码 URL/key；重点标 debuggable、allowBackup、exported=true 组件、自定义 deeplink scheme、usesCleartextTraffic——CTF 里这些指向隐藏入口。

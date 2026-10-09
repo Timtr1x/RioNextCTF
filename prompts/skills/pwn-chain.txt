@@ -8,4 +8,4 @@
 6. 双版本/补丁题：radiff2 -A -C old new 做函数级 diff；补丁模式反查 bug 类：新增溢出检查=整数溢出、新增锁/refcount=竞态或 UAF、新增边界判断=OOB、新增清零=信息泄露；验证标准是没补丁的崩、打过补丁的不崩。
 7. 拿到 shell 或读 flag 后：cat /flag、cat flag、ls / 逐一路径试；flag 原文 submit_fact。
 
-纪律：本地和远程的 libc/保护差异必须写进 observation；远程失败先比 host/libc/loader/framing 差异，再怀疑原语本身；exploit 脚本存 /workspace/work 并注明运行方式；连续两次同一 payload 失败就停下来重查保护，不要加噪声重试；负证据也写 observation；checkpoint 只写增量。
+纪律：本地和远程的 libc/保护差异必须写进 observation；远程失败先比 host/libc/loader/framing 差异，再怀疑原语本身；exploit 脚本存 /workspace/work 并注明运行方式；同一 payload 重复失败且没有任何新信息时停下来重查保护；出现新线索（不同报错、偏移变化、环境差异）则说明值得继续；负证据也写 observation；checkpoint 只写增量。

@@ -153,11 +153,11 @@ export function specFromInput(
   });
   const overlayText = triage.overlay ? `/${triage.overlay}` : "";
   const endpointText = source.endpoint ? ` 远程服务 tcp://${source.endpoint.host}:${source.endpoint.port}（容器内可达，pwntools remote() 或 nc）。` : "";
-  const webText = source.webUrl ? ` 本题还有 live web 靶机 ${source.webUrl}（容器内可达），附件是它的源码/配套材料：先读源码找漏洞点，再打靶机拿 flag。` : "";
+  const webText = source.webUrl ? ` 本题还有 live web 靶机 ${source.webUrl}（容器内可达），附件是它的源码/配套材料；源码和靶机都是证据来源，按价值决定先审源码还是直接探测。` : "";
   const question =
     `挑战附件已就位：${root}/input/original（${manifest.entries.length} 个文件，SHA-256 清单见 ${root}/input/manifest.json）。` +
-    `题型判定 ${triage.kind}${overlayText}（置信度 ${triage.confidence}）。` +
-    `按 user_payload.skill_pack 的流程分析附件；input/original 只读，中间产物写 ${root}/work，证据写 ${root}/artifacts。` +
+    `题型判定 ${triage.kind}${overlayText}（置信度 ${triage.confidence}），只作参考，分类错了可以跨题型用工具。` +
+    `user_payload.skill_pack 是该题型可参考的方法（不是固定流程，允许跳步）；input/original 只读，中间产物写 ${root}/work，证据写 ${root}/artifacts。` +
     endpointText +
     webText +
     `恢复 flag 后调用 submit_fact，fact_key=flag_recovered，proposition 为 flag 原文。`;

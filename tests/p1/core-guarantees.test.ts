@@ -13,7 +13,8 @@ import { ProviderCatalog } from "../../src/provider/catalog.ts";
 import { createCataloguedProviderStream } from "../../src/provider/stream.ts";
 import { pickFairReadyStep } from "../../src/scheduler/fair.ts";
 import { SCRIPTED_MODEL } from "../../src/runtime/pi/scripted-stream.ts";
-import { buildContextPack, loadPrompt } from "../../src/context/builder.ts";
+import { buildContextPack, composeSystemPrompt, loadPrompt } from "../../src/context/builder.ts";
+import { buildKaliFlagSpec } from "../../src/domain/quick-spec.ts";
 import { inspectWorld, freshWorld } from "../../src/tools/synthetic.ts";
 import { loadDemoSpec } from "../../src/eval/helpers.ts";
 import { confirmFindingIfCurrent } from "../../src/verification/verdict.ts";
@@ -442,14 +443,23 @@ test("incomplete decide does not spin a tight empty loop", async () => {
   e.close();
 });
 
-test("execute prompt forbids container php as unserialize oracle", () => {
-  const prompt = loadPrompt("execute");
-  assert.match(prompt, /活靶/);
-  assert.match(prompt, /unserialize/);
-  assert.match(prompt, /容器/);
-  assert.match(prompt, /artifact_read/);
-  assert.match(prompt, /truncated/);
-  assert.match(prompt, /必须调用 finish_step/);
+test("execute prompt is generic; web/flag specifics live in briefs and the env index", () => {
+  const base = loadPrompt("execute");
+  // the generic base must not carry web-target or flag-only global rules
+  assert.ok(!base.includes("unserialize"));
+  assert.ok(!base.includes("flag_recovered"));
+  assert.ok(!base.includes("artifact_read"));
+
+  // the composed prompt for a pure web flag campaign still carries them
+  const spec = buildKaliFlagSpec({ url: "http://target.example/", provider: "prv_test", model: "m" });
+  const composed = composeSystemPrompt("execute", spec);
+  assert.match(composed, /环境可能不同/); // web brief: container vs target
+  assert.match(composed, /目标的实际响应/);
+  assert.match(composed, /artifact_read/); // env index: paging
+  assert.match(composed, /truncated/);
+  assert.match(composed, /finish_step/);
+  assert.match(composed, /flag_recovered/); // ctf brief: flag submission semantics
+  assert.match(composed, /外部验收/);
 });
 
 test("hints land in the next context pack", () => {

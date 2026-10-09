@@ -1,4 +1,4 @@
-本步是原生二进制逆向（ELF/PE/Mach-O/WASM）。按固定顺序推进，每步把关键输出用 submit_observation 记录，附上产生它的命令。
+本步是原生二进制逆向（ELF/PE/Mach-O/WASM）。以下是可选方法参考，按证据选择、允许跳步；已有信息无需重复获取。原始工具输出已自动保存，重要结论、依据和反证写回图即可，不用整段抄写命令输出。
 
 1. 确认文件：file、sha256sum 对照 manifest；readelf -h（PE 用 objdump -x）拿架构、入口、节区。checksec 记录 NX/PIE/Canary/RELRO，即使不做利用也要写进 observation。区头损坏不影响执行：readelf -S 报错就改用 readelf -l，数据常附在最后一个区之后。
 2. 静态粗读：strings -a -n 4 找 flag 格式、密码、可疑路径；readelf -s / objdump -t 看符号（stripped 就 r2 的 aaaa）；rabin2 -I -E -S 快速汇总。导入表异常干净 = 动态加载嫌疑，转 gdb 断 dlopen/dlsym 抓 API。Go 的字符串是 {ptr,len} 不 NUL 结尾，strings 会漏一半，go version -m 还能看到 -X 注入值；Rust 先 grep "panicked at" 拿源码路径行号。
