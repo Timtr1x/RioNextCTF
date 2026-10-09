@@ -2,6 +2,7 @@ import { SCHEMA_VERSION } from "../version.ts";
 import { isChallengeKind, type ChallengeInfo, type TriageEvidence } from "./challenge-kind.ts";
 import { invalidInput } from "./errors.ts";
 import type { CampaignSpec, CampaignState } from "./types.ts";
+import { parseHttpUrl } from "./url.ts";
 
 export const DEFAULT_MAX_CALLS = 3000;
 export const DEFAULT_MAX_TOKENS = 120_000_000;
@@ -138,7 +139,17 @@ export function validateCampaignSpec(input: unknown): CampaignSpec {
     environment_revision: requireString(raw, "environment_revision"),
   };
   const challenge = parseChallengeInfo(raw.challenge);
-  if (challenge) spec.challenge = challenge;
+  if (challenge) {
+    // A declared live web target must be backed by an explicit scope entry;
+    // the validator never widens scope on its own.
+    if (challenge.web_url && !spec.scope.entries.includes(challenge.web_url)) {
+      throw invalidInput(
+        "invalid_challenge",
+        "challenge.web_url must also be declared in scope.entries; the validator does not widen scope",
+      );
+    }
+    spec.challenge = challenge;
+  }
   return spec;
 }
 
@@ -186,6 +197,20 @@ function parseChallengeInfo(raw: unknown): ChallengeInfo | undefined {
   }
   const endpoint = optionalString(obj, "endpoint");
   if (endpoint) out.endpoint = endpoint;
+  const webUrl = optionalString(obj, "web_url");
+  if (webUrl !== undefined) {
+    if (webUrl.trim() === "") {
+      throw invalidInput("invalid_challenge", "challenge.web_url must not be blank");
+    }
+    try {
+      out.web_url = parseHttpUrl(webUrl).toString();
+    } catch (err) {
+      throw invalidInput(
+        "invalid_challenge",
+        `challenge.web_url is not a valid http(s) URL: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   return out;
 }
 

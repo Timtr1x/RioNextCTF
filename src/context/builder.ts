@@ -4,7 +4,13 @@ import { SKILL_BY_METHOD_FAMILY } from "../domain/challenge-kind.ts";
 import { hashJson } from "../domain/fingerprint.ts";
 import type { ContextManifest, ReadSetEntry, RunLease } from "../domain/types.ts";
 import type { StorageService } from "../storage/service.ts";
-import { binGroupsFor, isKaliProfile, KALI_BACKGROUND_BINS, pyLibsFor } from "../tools/kali-profile.ts";
+import {
+  binGroupsForCaps,
+  CTF_PY_LIBS,
+  isKaliProfile,
+  KALI_BACKGROUND_BINS,
+  resolveToolCapabilities,
+} from "../tools/kali-profile.ts";
 import { PROMPT_VERSION } from "../version.ts";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -47,13 +53,21 @@ export function loadSkill(file: string): string | null {
 
 /**
  * Execute-only, kali-only, input-campaigns-only. The step's method_family picks
- * one skill file; the header lists the kind's allowlist by purpose so the model
- * sees what exists without probing (unlisted tools are banned), flags the
- * background scanners, and names the ctf-python libraries. Web campaigns carry
- * no spec.challenge and always get skill_pack: null.
+ * one skill file; the header lists the campaign's resolved capability set by
+ * purpose so the model sees what exists without probing (unlisted tools are
+ * banned), flags the background scanners, and names the ctf-python libraries.
+ * The challenge kind only marks the recommended group; every listed group is
+ * actually allowed. Web campaigns carry no spec.challenge and always get
+ * skill_pack: null.
  */
 function buildSkillPack(
-  camp: { spec: { execution_profile: string; challenge?: { kind: string; seed_method_family: string } } },
+  camp: {
+    spec: {
+      execution_profile: string;
+      challenge?: { kind: string; seed_method_family: string; web_url?: string };
+      scope: { entries: string[] };
+    };
+  },
   step: unknown,
 ): string | null {
   const challenge = camp.spec.challenge;
@@ -67,17 +81,27 @@ function buildSkillPack(
   if (!file) return null;
   const text = loadSkill(file);
   if (!text) return null;
-  const lines = [`# ${family}（${challenge.kind}）`, "本战役可用工具（未列出的一律不可用，禁止 apt/pip 安装）："];
+  const resolved = resolveToolCapabilities(camp.spec);
+  const caps = resolved.capabilities;
+  const lines = [
+    `# ${family}（${challenge.kind}）`,
+    "本战役可用工具（未列出的一律不可用，禁止 apt/pip 安装；标注（推荐）只是按当前分类的建议，证据指向哪里就用哪组）：",
+  ];
   const background: string[] = [];
-  for (const [label, bins] of binGroupsFor(challenge.kind)) {
+  for (const [label, bins] of binGroupsForCaps(caps, challenge.kind)) {
     const list = [...bins].sort();
     lines.push(`- ${label}: ${list.join(" ")}`);
     for (const b of list) if (KALI_BACKGROUND_BINS.has(b)) background.push(b);
   }
   if (background.length > 0) {
-    lines.push(`后台执行（返回 execution_id，勿轮询）: ${background.sort().join(" ")}`);
+    lines.push(`后台执行（返回 execution_id，勿轮询）: ${[...new Set(background)].sort().join(" ")}`);
   }
-  lines.push(`ctf-python 已装库: ${pyLibsFor(challenge.kind).join(" ")}`, "", text);
+  if (caps.includes("ctf")) {
+    const libs = new Set<string>();
+    for (const group of Object.values(CTF_PY_LIBS)) group.forEach((l) => libs.add(l));
+    lines.push(`ctf-python 已装库: ${[...libs].sort().join(" ")}`);
+  }
+  lines.push("", text);
   return lines.join("\n");
 }
 

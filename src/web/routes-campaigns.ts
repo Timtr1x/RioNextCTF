@@ -7,6 +7,7 @@ import { invalidInput } from "../domain/errors.ts";
 import { MAX_INPUT_FILE_BYTES, MAX_INPUT_TOTAL_BYTES, originalRoot, stageInput } from "../domain/input-manifest.ts";
 import { campaignIdForInput, parseTargetUrl } from "../domain/quick-spec.ts";
 import { seedChallengeStep, specFromInput, specFromUrl, type RunSource } from "../cli/run-spec.ts";
+import { resolveToolCapabilities } from "../tools/kali-profile.ts";
 import type { CampaignSpec } from "../domain/types.ts";
 import type { ApiContext, ApiHandler } from "./server.ts";
 import type { EngineHost } from "./engine-host.ts";
@@ -17,11 +18,14 @@ const ARTIFACT_READ_CAP = 256 * 1024;
 const LIST_TABLES = new Set(["steps", "facts", "findings", "observations", "coverage_items", "task_runs", "invocations", "goals", "artifacts"]);
 
 function specSummary(spec: CampaignSpec): Record<string, unknown> {
+  const resolved = resolveToolCapabilities(spec);
   return {
     mode: spec.mode,
     statement: spec.root_goal?.statement ?? "",
     assets: spec.scope?.assets ?? [],
     challenge: spec.challenge ?? null,
+    capabilities: resolved.capabilities,
+    capabilities_reason: resolved.reason,
     budget: spec.budget ?? null,
     model: spec.model_policy ? { provider: spec.model_policy.provider, model: spec.model_policy.model } : null,
   };

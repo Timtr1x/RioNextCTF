@@ -23,6 +23,7 @@ import type { DockerCli } from "../tools/docker-cli.ts";
 import { FileEffectAdapter, type EffectAdapter } from "../tools/effect-adapter.ts";
 import type { ResolveFn } from "../tools/egress.ts";
 import { KaliEffectAdapter, RoutingEffectAdapter } from "../tools/kali-adapter.ts";
+import { resolveToolCapabilities } from "../tools/kali-profile.ts";
 import { KaliRuntime, containerName, type KaliStartOpts } from "../tools/kali-runtime.ts";
 import { ArtifactStore } from "../storage/artifacts.ts";
 import { backupStore, restoreStore, type BackupReport, type RestoreReport } from "../storage/backup.ts";
@@ -195,6 +196,9 @@ export class Engine {
   kaliOpts(campaignId: string): KaliStartOpts {
     const camp = this.storage.getCampaign(campaignId);
     const allow = camp.spec.scope.assets;
+    // Admission follows what the task actually carries (attachments, configured
+    // entries, validated web_url), not the challenge classification. Each
+    // campaign resolves its own set, shared container or not.
     const opts: KaliStartOpts = {
       campaignId,
       workspaceHost: join(this.config.data_dir, "workspace", campaignId),
@@ -205,7 +209,7 @@ export class Engine {
       allowAssets: allow,
       network: allow.length ? "allowlist" : "none",
       resolve: this.options.kaliResolve,
-      challengeKind: camp.spec.challenge?.kind ?? "web",
+      capabilities: resolveToolCapabilities(camp.spec).capabilities,
     };
     if (this.options.kaliShared) {
       // Contest mode: exec into the shared container; this campaign's

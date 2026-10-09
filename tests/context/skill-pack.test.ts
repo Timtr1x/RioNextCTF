@@ -122,7 +122,8 @@ test("execute on an input campaign gets the family skill; web gets null", () => 
     assert.match(skill, /\bgdb\b/);
     assert.match(skill, /r2/);
     assert.match(skill, /未列出的一律不可用/);
-    assert.match(skill, /- 逆向\/利用: /);
+    assert.match(skill, /- 逆向\/利用（推荐）: /);
+    assert.match(skill, /只是按当前分类的建议/);
     assert.match(skill, /ctf-python 已装库: .*pwntools/);
     assert.equal(pack.system_prompt.includes("kali_run"), true); // execute prompt unchanged location
 
@@ -172,6 +173,29 @@ test("pwn skill mentions the endpoint workflow; crypto skill mentions RSA discip
     const cryptoStep = seedStep(e, "camp_crypto", "ctf-crypto");
     const cryptoPack = buildContextPack(e.storage, lease("camp_crypto", "execute", cryptoStep));
     assert.match(payload(cryptoPack).skill_pack as string, /RSA/);
+  } finally {
+    e.close();
+  }
+});
+
+test("mixed campaign skill pack lists both ctf and web tool groups", () => {
+  const dir = tmp();
+  const e = openEngine(dir, { silent: true, maxCycles: 1 });
+  try {
+    const spec = buildInputFlagSpec({
+      ...PROVIDER,
+      campaign_id: "camp_mixed",
+      triage: { kind: "generic", confidence: "low", evidence: [], seed_method_family: "ctf-triage" },
+      input: { source_name: "src", files: 1, total_bytes: 8, sha256: "aa".repeat(32) },
+      web_url: "http://web.example:8080/",
+    });
+    e.createCampaign(spec);
+    const stepId = seedStep(e, "camp_mixed", "ctf-triage");
+    const pack = buildContextPack(e.storage, lease("camp_mixed", "execute", stepId));
+    const skill = payload(pack).skill_pack as string;
+    assert.match(skill, /- Misc\/取证/);
+    assert.match(skill, /- Web: /);
+    assert.match(skill, /\bnuclei\b/);
   } finally {
     e.close();
   }

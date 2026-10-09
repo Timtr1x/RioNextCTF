@@ -143,42 +143,6 @@ export const CTF_PY_LIBS = {
   crypto: ["pycryptodome", "sympy", "gmpy2", "fpylll", "z3"],
 } as const;
 
-/** Labelled binary groups for the skill_pack header, per challenge kind. */
-export function binGroupsFor(kind: string): Array<[string, ReadonlySet<string>]> {
-  const groups: Array<[string, ReadonlySet<string>]> = [
-    ["基础", BASE_BINS],
-    ["CTF 通用", CTF_BASE_BINS],
-  ];
-  const push = (label: string, bins: ReadonlySet<string>) => {
-    if (!groups.some(([, s]) => s === bins)) groups.push([label, bins]);
-  };
-  if (kind === "reverse" || kind === "pwn") push("逆向/利用", BINARY_BINS);
-  else if (kind === "misc") push("Misc/取证", MISC_BINS);
-  else if (kind === "crypto") push("密码", CRYPTO_BINS);
-  else {
-    push("逆向/利用", BINARY_BINS);
-    push("Misc/取证", MISC_BINS);
-    push("密码", CRYPTO_BINS);
-    push("网络", new Set(["curl", "wget"]));
-  }
-  return groups;
-}
-
-/** ctf-python library list for the skill_pack header, per challenge kind. */
-export function pyLibsFor(kind: string): string[] {
-  const out = new Set<string>();
-  const add = (libs: readonly string[]) => libs.forEach((l) => out.add(l));
-  if (kind === "reverse" || kind === "pwn") add(CTF_PY_LIBS.binary);
-  else if (kind === "misc") add(CTF_PY_LIBS.misc);
-  else if (kind === "crypto") add(CTF_PY_LIBS.crypto);
-  else {
-    add(CTF_PY_LIBS.binary);
-    add(CTF_PY_LIBS.misc);
-    add(CTF_PY_LIBS.crypto);
-  }
-  return [...out];
-}
-
 function union(...sets: ReadonlySet<string>[]): Set<string> {
   const out = new Set<string>();
   for (const s of sets) for (const b of s) out.add(b);
@@ -188,10 +152,20 @@ function union(...sets: ReadonlySet<string>[]): Set<string> {
 /** Legacy flat web allowlist. Exactly BASE+WEB; do not add CTF tools here. */
 export const KALI_BINARIES = union(BASE_BINS, WEB_BINS);
 
+/** The full CTF capability set: every non-web challenge tool plus curl/wget. */
+export const CTF_CAPABILITY_BINS = union(
+  BASE_BINS,
+  CTF_BASE_BINS,
+  BINARY_BINS,
+  MISC_BINS,
+  CRYPTO_BINS,
+  new Set(["curl", "wget"]),
+);
+
 /**
- * Binary set for a challenge kind. "web" is the legacy set; unknown kinds fall
- * back to the broad CTF union (never used for web campaigns, which carry no
- * spec.challenge and default to "web" at the call site).
+ * Recommendation helper: the binary set a challenge kind suggests starting
+ * with. Admission no longer depends on it; the production exec path resolves
+ * capabilities from the spec instead (resolveToolCapabilities).
  */
 export function allowedBinsFor(kind: string): ReadonlySet<string> {
   switch (kind) {
@@ -205,14 +179,105 @@ export function allowedBinsFor(kind: string): ReadonlySet<string> {
     case "crypto":
       return union(BASE_BINS, CTF_BASE_BINS, CRYPTO_BINS);
     default:
-      return union(BASE_BINS, CTF_BASE_BINS, BINARY_BINS, MISC_BINS, CRYPTO_BINS, new Set(["curl", "wget"]));
+      return CTF_CAPABILITY_BINS;
   }
+}
+
+/**
+ * Tool capability groups a campaign may use. "ctf" covers attachments/binary/
+ * misc/crypto work (including nc/socat TCP clients); "web" covers the HTTP
+ * scanner set. They compose: a source-plus-live-app challenge gets both.
+ */
+export type ToolCapability = "web" | "ctf";
+
+export interface ResolvedToolCapabilities {
+  capabilities: ToolCapability[];
+  reason: string[];
+}
+
+/** Structural view of CampaignSpec so this module stays free of domain cycles. */
+export interface CapabilitySource {
+  execution_profile: string;
+  challenge?: { kind: string; web_url?: string; input?: unknown };
+  scope: { entries: string[] };
+}
+
+/**
+ * Deterministic capability resolution. kind/classification only recommends;
+ * admission comes from what the task actually carries: a challenge record
+ * (attachments), a configured http(s) entry point, or a validated web_url.
+ * Nothing here reads prompts, model output or description text.
+ */
+export function resolveToolCapabilities(spec: CapabilitySource): ResolvedToolCapabilities {
+  if (!isKaliProfile(spec.execution_profile)) {
+    return { capabilities: [], reason: ["non-kali execution profile"] };
+  }
+  const caps = new Set<ToolCapability>();
+  const reason: string[] = [];
+  if (spec.challenge) {
+    caps.add("ctf");
+    reason.push("challenge record (attachments)");
+  }
+  const hasHttpEntry = spec.scope.entries.some((e) => /^https?:\/\//i.test(e));
+  if (hasHttpEntry) {
+    caps.add("web");
+    reason.push("http(s) scope entry");
+  }
+  if (spec.challenge?.web_url) {
+    caps.add("web");
+    reason.push("challenge.web_url");
+  }
+  if (caps.size === 0) {
+    // Legacy kali campaign without a challenge record: keep the old web set.
+    caps.add("web");
+    reason.push("legacy kali default");
+  }
+  const order: ToolCapability[] = ["ctf", "web"];
+  return { capabilities: order.filter((c) => caps.has(c)), reason };
+}
+
+/** Actual binary set for resolved capabilities. Deduped by union. */
+export function allowedBinsForCapabilities(caps: readonly ToolCapability[]): ReadonlySet<string> {
+  const parts: ReadonlySet<string>[] = [];
+  if (caps.includes("ctf")) parts.push(CTF_CAPABILITY_BINS);
+  if (caps.includes("web")) parts.push(KALI_BINARIES);
+  return union(...parts);
+}
+
+/** Per-campaign admission: capability set membership; impacket- needs web. */
+export function isAllowedKaliBinForCaps(bin: string, caps: readonly ToolCapability[]): boolean {
+  if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
+  if (allowedBinsForCapabilities(caps).has(bin)) return true;
+  return caps.includes("web") && bin.startsWith("impacket-");
+}
+
+/**
+ * Labelled binary groups for the skill_pack header, from the resolved
+ * capability set. recommendKind only marks a group as suggested; every listed
+ * group is actually usable.
+ */
+export function binGroupsForCaps(
+  caps: readonly ToolCapability[],
+  recommendKind?: string,
+): Array<[string, ReadonlySet<string>]> {
+  const rec = (label: string, kinds: string[]) =>
+    recommendKind && kinds.includes(recommendKind) ? `${label}（推荐）` : label;
+  const groups: Array<[string, ReadonlySet<string>]> = [["基础", BASE_BINS]];
+  if (caps.includes("ctf")) {
+    groups.push(["CTF 通用", CTF_BASE_BINS]);
+    groups.push([rec("逆向/利用", ["reverse", "pwn"]), BINARY_BINS]);
+    groups.push([rec("Misc/取证", ["misc"]), MISC_BINS]);
+    groups.push([rec("密码", ["crypto"]), CRYPTO_BINS]);
+    if (!caps.includes("web")) groups.push(["网络", new Set(["curl", "wget"])]);
+  }
+  if (caps.includes("web")) groups.push([rec("Web", ["web"]), WEB_BINS]);
+  return groups;
 }
 
 /** Any binary known to any profile; used only for payload routing, not admission. */
 export function isKnownKaliBin(bin: string): boolean {
   if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
-  if (allowedBinsFor("generic").has(bin) || KALI_BINARIES.has(bin)) return true;
+  if (CTF_CAPABILITY_BINS.has(bin) || KALI_BINARIES.has(bin)) return true;
   return bin.startsWith("impacket-");
 }
 
@@ -240,13 +305,6 @@ export function isAllowedKaliBin(bin: string): boolean {
   if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
   if (KALI_BINARIES.has(bin)) return true;
   return bin.startsWith("impacket-");
-}
-
-/** Per-kind admission: set membership, with the impacket- prefix reserved for web. */
-export function isAllowedKaliBinFor(bin: string, kind: string): boolean {
-  if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
-  if (allowedBinsFor(kind).has(bin)) return true;
-  return kind === "web" && bin.startsWith("impacket-");
 }
 
 /** Relative path under /workspace. Absolute paths must start with /workspace/. */
@@ -311,13 +369,13 @@ export function shouldBackgroundKali(bin: string, _timeoutMs?: number): boolean 
 }
 
 /**
- * @param kind challenge kind for the campaign; undefined keeps legacy web
- * behavior (KALI_BINARIES + impacket- prefix).
+ * @param caps resolved capabilities for the campaign; undefined keeps legacy
+ * web behavior (KALI_BINARIES + impacket- prefix).
  */
-export function assertKaliArgv(bin: string, args: string[], kind?: string): void {
-  const allowed = kind === undefined ? isAllowedKaliBin(bin) : isAllowedKaliBinFor(bin, kind);
+export function assertKaliArgv(bin: string, args: string[], caps?: readonly ToolCapability[]): void {
+  const allowed = caps === undefined ? isAllowedKaliBin(bin) : isAllowedKaliBinForCaps(bin, caps);
   if (!allowed) {
-    argvDenied(`kali binary not allowlisted${kind ? ` for ${kind}` : ""}: ${bin}`);
+    argvDenied(`kali binary not allowlisted${caps ? ` for capabilities ${caps.join("+")}` : ""}: ${bin}`);
   }
   if (KALI_INTERPRETERS.has(bin)) {
     assertInterpreterArgv(args);

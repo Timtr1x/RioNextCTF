@@ -69,7 +69,7 @@ test("nc host port pairs pass egress only for the allowed endpoint", () => {
     allowAssets: ["pwn.example:31337"],
     network: "allowlist" as const,
     resolve: (h: string) => (h === "pwn.example" ? ["10.9.9.9"] : []),
-    challengeKind: "pwn",
+    capabilities: ["ctf" as const],
   };
   const okExec = rt.exec(opts, "nc", ["pwn.example", "31337"]);
   assert.equal(okExec.code, 0);
@@ -97,13 +97,13 @@ test("socat TCP:host:port args are egress-checked", () => {
     allowAssets: ["pwn.example:31337"],
     network: "allowlist" as const,
     resolve: (h: string) => (h === "pwn.example" ? ["10.9.9.9"] : []),
-    challengeKind: "pwn",
+    capabilities: ["ctf" as const],
   };
   assert.equal(rt.exec(opts, "socat", ["-", "TCP:pwn.example:31337"]).code, 0);
   assert.throws(() => rt.exec(opts, "socat", ["-", "TCP:pwn.example:22"]));
 });
 
-test("kind flows into the binary allowlist at exec time", () => {
+test("capabilities drive the binary allowlist at exec time", () => {
   const dir = tmp();
   const docker = new RecordingDocker();
   const rt = new KaliRuntime(docker as never);
@@ -118,9 +118,9 @@ test("kind flows into the binary allowlist at exec time", () => {
     network: "none" as const,
   };
   // web campaign: gdb is denied even though the binary exists in the image
-  assert.throws(() => rt.exec({ ...base, challengeKind: "web" }, "gdb", ["--version"]), /not allowlisted/);
+  assert.throws(() => rt.exec({ ...base, capabilities: ["web"] }, "gdb", ["--version"]), /not allowlisted/);
   // reverse campaign: allowed
-  assert.equal(rt.exec({ ...base, challengeKind: "reverse" }, "gdb", ["--version"]).code, 0);
-  // legacy callers without challengeKind keep web semantics
+  assert.equal(rt.exec({ ...base, capabilities: ["ctf"] }, "gdb", ["--version"]).code, 0);
+  // legacy callers without capabilities keep web semantics
   assert.throws(() => rt.exec(base, "gdb", ["--version"]), /not allowlisted/);
 });

@@ -7,7 +7,24 @@ import { pickRunSource, seedChallengeStep, specFromInput } from "../../src/cli/r
 import { openEngine } from "../../src/controller/engine.ts";
 import { DomainError } from "../../src/domain/errors.ts";
 import { campaignIdForInput } from "../../src/domain/quick-spec.ts";
+import { validateCampaignSpec } from "../../src/domain/spec.ts";
 import { ProviderCatalog } from "../../src/provider/catalog.ts";
+import { resolveToolCapabilities } from "../../src/tools/kali-profile.ts";
+import type { DockerExecResult, DockerRunOpts } from "../../src/tools/docker-cli.ts";
+import { KaliRuntime } from "../../src/tools/kali-runtime.ts";
+
+/** Minimal docker fake: every call succeeds, argv recorded. */
+class RecordingDocker {
+  calls: string[][] = [];
+  run(argv: string[], _opts?: DockerRunOpts): DockerExecResult {
+    this.calls.push(argv);
+    if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) {
+      return { code: 0, stdout: "true\n", stderr: "", timedOut: false };
+    }
+    if (argv[0] === "image") return { code: 0, stdout: "sha256:fake\n", stderr: "", timedOut: false };
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  }
+}
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rn-runinput-"));
@@ -224,7 +241,83 @@ test("input campaign without endpoint runs networkless", () => {
     const rec = e.createCampaign(spec);
     const opts = e.kaliOpts(rec.id);
     assert.equal(opts.network, "none");
-    assert.equal(opts.challengeKind, "reverse");
+    assert.deepEqual(opts.capabilities, ["ctf"]);
+  } finally {
+    e.close();
+  }
+});
+
+test("challenge.web_url survives validate → create → getCampaign → engine reopen", () => {
+  const dir = tmp();
+  withSolver(dir);
+  const src = join(dir, "websrc");
+  writeFileSync(src, "<?php echo 1; ?>");
+  const loaded = specFromInput({ kind: "input", path: src, webUrl: "http://web.example:8080/" }, dir);
+  const spec = loaded.spec as { campaign_id: string };
+  const e = openEngine(dir, { silent: true, maxCycles: 1 });
+  try {
+    const rec = e.createCampaign(loaded.spec as Parameters<typeof e.createCampaign>[0]);
+    const camp = e.storage.getCampaign(rec.id);
+    assert.equal(camp.spec.challenge?.web_url, "http://web.example:8080/");
+    assert.deepEqual(resolveToolCapabilities(camp.spec).capabilities, ["ctf", "web"]);
+    assert.deepEqual(e.kaliOpts(rec.id).capabilities, ["ctf", "web"]);
+  } finally {
+    e.close();
+  }
+  const reopened = openEngine(dir, { silent: true, maxCycles: 1 });
+  try {
+    const camp = reopened.storage.getCampaign(spec.campaign_id);
+    assert.equal(camp.spec.challenge?.web_url, "http://web.example:8080/");
+    assert.deepEqual(reopened.kaliOpts(spec.campaign_id).capabilities, ["ctf", "web"]);
+  } finally {
+    reopened.close();
+  }
+});
+
+test("challenge.web_url rejects non-http(s), blank, and scope-mismatched values", () => {
+  const dir = tmp();
+  withSolver(dir);
+  const src = join(dir, "websrc");
+  writeFileSync(src, "<?php echo 1; ?>");
+  const loaded = specFromInput({ kind: "input", path: src, webUrl: "http://web.example:8080/" }, dir);
+  const spec = loaded.spec as Record<string, unknown>;
+  const challenge = spec.challenge as Record<string, unknown>;
+
+  const isInvalidChallenge = (e: unknown) => e instanceof DomainError && e.code === "invalid_challenge";
+  assert.throws(() => validateCampaignSpec({ ...spec, challenge: { ...challenge, web_url: "ftp://web.example/" } }), isInvalidChallenge);
+  assert.throws(() => validateCampaignSpec({ ...spec, challenge: { ...challenge, web_url: "javascript:alert(1)" } }), isInvalidChallenge);
+  assert.throws(() => validateCampaignSpec({ ...spec, challenge: { ...challenge, web_url: "   " } }), isInvalidChallenge);
+  // a declared web target the scope does not carry: explicit error, never silent widening
+  assert.throws(() => validateCampaignSpec({ ...spec, challenge: { ...challenge, web_url: "http://other.example/" } }), isInvalidChallenge);
+  // and the well-formed spec passes
+  assert.doesNotThrow(() => validateCampaignSpec(spec));
+});
+
+test("mixed source+web campaign admits nmap/sqlmap/nuclei through the real exec path", () => {
+  const dir = tmp();
+  withSolver(dir);
+  const src = join(dir, "websrc");
+  writeFileSync(src, "<?php echo 1; ?>");
+  const loaded = specFromInput({ kind: "input", path: src, webUrl: "http://web.example:8080/" }, dir);
+  const e = openEngine(dir, { silent: true, maxCycles: 1 });
+  try {
+    const rec = e.createCampaign(loaded.spec as Parameters<typeof e.createCampaign>[0]);
+    const opts = e.kaliOpts(rec.id);
+    assert.deepEqual(opts.capabilities, ["ctf", "web"]);
+    const docker = new RecordingDocker();
+    const rt = new KaliRuntime(docker as never);
+    opts.resolve = (h: string) => (h === "web.example" ? ["10.1.2.3"] : []);
+    for (const bin of ["nmap", "sqlmap", "nuclei"]) {
+      const r = rt.exec(opts, bin, ["web.example"]);
+      assert.equal(r.code, 0, `${bin} must pass argv admission for a mixed campaign`);
+    }
+    // the ctf half is there too: misclassification no longer blocks gdb
+    assert.equal(rt.exec(opts, "gdb", ["--version"]).code, 0);
+    // egress is still enforced for out-of-scope hosts
+    assert.throws(
+      () => rt.exec(opts, "nmap", ["other.example"]),
+      (err: unknown) => err instanceof DomainError && err.code === "egress_denied",
+    );
   } finally {
     e.close();
   }

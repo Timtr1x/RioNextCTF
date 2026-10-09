@@ -15,6 +15,7 @@ import {
   PLAYWRIGHT_OPS,
   shouldBackgroundKali,
   workspaceRelPath,
+  type ToolCapability,
 } from "./kali-profile.ts";
 
 /**
@@ -41,8 +42,8 @@ export interface KaliStartOpts {
   network: "none" | "allowlist" | "bridge";
   image?: string;
   resolve?: ResolveFn;
-  /** Challenge kind drives the binary allowlist; absent means legacy web. */
-  challengeKind?: string;
+  /** Resolved tool capabilities drive the binary allowlist; absent means legacy web. */
+  capabilities?: ToolCapability[];
   shared?: KaliSharedSpec;
   /** Container resource overrides; defaults come from DEFAULT_KALI_LIMITS. */
   limits?: { memory?: string; cpus?: string };
@@ -379,7 +380,7 @@ export class KaliRuntime {
     args: string[],
     extra?: { url?: string; redirects?: string[]; timeout_ms?: number; executionId?: string; background?: boolean },
   ): DockerExecResult & { truncated: boolean; container: string; pending?: boolean } {
-    assertKaliArgv(bin, args, opts.challengeKind ?? "web");
+    assertKaliArgv(bin, args, opts.capabilities);
     const allow = parseAllowList(opts.allowAssets);
     const resolve = opts.resolve ?? ((h: string) => defaultResolve(h));
     if (extra?.url) this.admitNet(extra.url, allow, resolve, extra.redirects ?? []);

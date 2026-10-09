@@ -221,6 +221,32 @@ test("rionext ui api end to end", async (t) => {
     assert.equal(emptyTriage.status, 400);
   });
 
+  await t.test("input campaign with web_url persists it and reports ctf+web capabilities", async () => {
+    const up = await api("/api/uploads", {
+      raw: elf64(),
+      headers: { "x-file-name": "app.elf", "x-upload-label": "mixedapp" },
+    });
+    assert.equal(up.status, 200);
+    const uploadId = String(up.body.upload_id);
+
+    const created = await api("/api/campaigns", {
+      body: { upload_id: uploadId, id: "camp_api_mixed", web_url: "http://web.example:8080/" },
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.created, true);
+
+    const view = await api("/api/campaigns/camp_api_mixed");
+    const spec = view.body.spec as Record<string, unknown>;
+    const challenge = spec.challenge as Record<string, unknown>;
+    assert.equal(challenge.web_url, "http://web.example:8080/");
+    assert.deepEqual(spec.capabilities, ["ctf", "web"]);
+
+    const bad = await api("/api/campaigns", {
+      body: { upload_id: uploadId, id: "camp_api_bad_mixed", web_url: "ftp://web.example/" },
+    });
+    assert.equal(bad.status, 400);
+  });
+
   await t.test("uploads/fetch downloads a remote attachment, then triage and create work", async () => {
     const payload = elf64();
     const srv = createServer((_req, res) => {

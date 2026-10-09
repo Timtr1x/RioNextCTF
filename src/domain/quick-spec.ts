@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
 import type { ChallengeInfo, ChallengeKind, TcpEndpoint, TriageResult } from "./challenge-kind.ts";
 import { invalidInput } from "./errors.ts";
+import { parseHttpUrl } from "./url.ts";
 import { SCHEMA_VERSION } from "../version.ts";
 import { DEFAULT_MAX_CALLS, DEFAULT_MAX_TOKENS } from "./spec.ts";
 import type { CampaignSpec } from "./types.ts";
+
+export { looksLikeHttpUrl } from "./url.ts";
+/** Legacy name kept for existing callers; implementation lives in url.ts. */
+export const parseTargetUrl = parseHttpUrl;
 
 export const KALI_FLAG_TOOLS = [
   "graph_query",
@@ -20,29 +25,6 @@ export const KALI_FLAG_TOOLS = [
   "kali_write",
   "playwright",
 ] as const;
-
-export function looksLikeHttpUrl(raw: string): boolean {
-  return /^https?:\/\/[^\s]+$/i.test(raw);
-}
-
-export function parseTargetUrl(raw: string): URL {
-  if (typeof raw !== "string" || raw.trim() === "") {
-    throw invalidInput("invalid_url", "target URL is required");
-  }
-  let url: URL;
-  try {
-    url = new URL(raw.trim());
-  } catch {
-    throw invalidInput("invalid_url", `not a URL: ${raw}`);
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw invalidInput("invalid_url", "URL must be http or https");
-  }
-  if (!url.hostname) {
-    throw invalidInput("invalid_url", "URL must include a hostname");
-  }
-  return url;
-}
 
 export function campaignIdForTarget(url: URL): string {
   const host = url.hostname.toLowerCase();
