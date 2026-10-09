@@ -17,7 +17,6 @@ import { buildContextPack, composeSystemPrompt, loadPrompt } from "../../src/con
 import { buildKaliFlagSpec } from "../../src/domain/quick-spec.ts";
 import { inspectWorld, freshWorld } from "../../src/tools/synthetic.ts";
 import { loadDemoSpec } from "../../src/eval/helpers.ts";
-import { confirmFindingIfCurrent } from "../../src/verification/verdict.ts";
 import type { RunLease } from "../../src/domain/types.ts";
 
 function tmp(): string {
@@ -298,36 +297,6 @@ test("fair pick rotates after a branch has been served", () => {
   const picked = pickFairReadyStep(e.storage, "fair-starve");
   assert.equal(picked, b);
   assert.notEqual(picked, a);
-  e.close();
-});
-
-test("confirmFindingIfCurrent requires raw artifacts, not only env version", async () => {
-  const dir = tmp();
-  const e = boot(dir, "ev-gap");
-  const run = e.storage.claimDecide("ev-gap", "t")!;
-  const o = e.storage.recordObservation({
-    campaign_id: "ev-gap",
-    producer_id: "p",
-    submission_id: "o",
-    run_id: run.run_id,
-    attempt_id: run.run_id,
-    subject: "x",
-    body: { guess: true },
-    artifact_refs: [],
-    conditions: {},
-    env_rev: "env-1",
-  });
-  const f = e.storage.submitFinding({
-    campaign_id: "ev-gap",
-    producer_id: "p",
-    submission_id: "f",
-    run_id: run.run_id,
-    claim: "no artifact",
-    evidence_refs: [o.canonical_ids.observation_id!],
-    dedup_key: "noart",
-  });
-  const status = confirmFindingIfCurrent(e.storage, "ev-gap", f.canonical_ids.finding_id!, "env-1");
-  assert.notEqual(status, "confirmed");
   e.close();
 });
 

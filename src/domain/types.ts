@@ -133,6 +133,17 @@ export interface ModelPolicy {
 export interface VerificationPolicy {
   require_independent_verify: boolean;
   oracle_id: string;
+  /** Assessment acceptance: suspected/validating findings must reach a verdict
+   *  before delivery. Absent on old specs means strict (true). */
+  require_confirmed_findings?: boolean;
+}
+
+/** Explicit verdict from a verify run's primary finish. Never from Finalize. */
+export interface VerificationResult {
+  target_id: string;
+  verdict: "confirmed" | "refuted" | "inconclusive";
+  evidence_refs: string[];
+  rationale: string;
 }
 
 export interface CoveragePolicy {
@@ -249,6 +260,8 @@ export interface TaskOutcome {
   next_action?: string | null;
   finish_requested: boolean;
   protocol_error: string | null;
+  /** Present on verify runs whose primary submitted an explicit verdict. */
+  verification_result?: VerificationResult | null;
 }
 
 export interface DomainEvent {

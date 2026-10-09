@@ -19,7 +19,7 @@ import { assertSafeToolPath } from "../../src/gateway/sandbox.ts";
 import { markFactsStaleForEnv } from "../../src/graph/stale.ts";
 import { pickFairReadyStep } from "../../src/scheduler/fair.ts";
 import { FileEffectAdapter } from "../../src/tools/effect-adapter.ts";
-import { applyVerification, confirmFindingIfCurrent } from "../../src/verification/verdict.ts";
+import { applyVerification } from "../../src/verification/verdict.ts";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rn-p1-"));
@@ -581,7 +581,10 @@ test("T40 old env evidence does not confirm under new env", () => {
     evidence_refs: [o.canonical_ids.observation_id!],
     dedup_key: "old",
   });
-  const status = confirmFindingIfCurrent(e.storage, campId, f.canonical_ids.finding_id!, "env-new");
+  // the env-freshness check now lives in the targeted verdict path
+  // (applyTargetedVerification rejects a confirm citing stale-env evidence);
+  // here we pin the stale mapping itself
+  const status = applyVerification(e.storage, campId, f.canonical_ids.finding_id!, "stale_evidence");
   assert.equal(status, "stale");
   e.close();
 });

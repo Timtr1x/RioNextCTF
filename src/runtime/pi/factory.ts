@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "typebox";
+import { Type, type TProperties } from "typebox";
 import { loadPrompt } from "../../context/builder.ts";
 import type { FinalizationConfig } from "../../contracts/finalization.ts";
 import {
@@ -406,6 +406,21 @@ export class PiWorker implements WorkerRuntime {
   }
 
   private finishStepTool(lease: RunLease, source: "primary" | "finalizer"): AgentTool {
+    // Only a primary verify run may attach a verdict, and only on its declared
+    // target. Finalize never sees this field (a dropped one is stripped anyway).
+    const verificationField: TProperties =
+      source === "primary" && lease.kind === "verify"
+        ? {
+            verification_result: Type.Optional(
+              Type.Object({
+                target_id: Type.String({ description: "the finding/fact this verify step was created for" }),
+                verdict: Type.Union([Type.Literal("confirmed"), Type.Literal("refuted"), Type.Literal("inconclusive")]),
+                evidence_refs: Type.Array(Type.String(), { description: "evidence gathered in THIS run" }),
+                rationale: Type.String(),
+              }),
+            ),
+          }
+        : {};
     return tool(
       "finish_step",
       "Required: end this execute fragment and free the slot. Call after progress, failure, truncated output, or cap. Checkpoint alone does not finish.",
@@ -440,6 +455,7 @@ export class PiWorker implements WorkerRuntime {
             }),
           ),
           next_action: Type.Optional(Type.String()),
+          ...verificationField,
         },
         { additionalProperties: false },
       ),

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { RuntimeConfig } from "../contracts/config.ts";
 import { configFingerprint, makeRuntimeConfig, printStartupBanner, validateStartupInput } from "../contracts/config.ts";
 import { buildContextPack } from "../context/builder.ts";
-import { evaluateCompletion, type CompletionSnapshot, type CoverageRow } from "../domain/completion.ts";
+import { evaluateCompletion, goalFactCanSatisfy, requiresIndependentGoalVerification, type CompletionSnapshot, type CoverageRow } from "../domain/completion.ts";
 import { DomainError } from "../domain/errors.ts";
 import type { CampaignSpec, CampaignState, RunLease, TaskOutcome } from "../domain/types.ts";
 import { decideChooser, executeChooser } from "../eval/demo-policy.ts";
@@ -658,6 +658,12 @@ export class Engine {
       },
       stop_reason: stopReason,
       unresolved: unresolved.map((s) => ({ id: s.id, question: s.question, status: s.status, blocked_reason: s.blocked_reason })),
+      goal_completion: (() => {
+        if (camp.spec.mode !== "goal_seeking") return "n/a";
+        if (!rootGoalSatisfied(camp.spec, this.storage, campaignId, world)) return "not_satisfied";
+        // honest wording: an observed-only policy completes on evidence, not on verification
+        return requiresIndependentGoalVerification(camp.spec) ? "independently_verified" : "observed_only_not_independently_verified";
+      })(),
       bounded_conclusion: boundedConclusion(camp.spec, world, coverage),
     };
     this.storage.saveReport(campaignId, report);
@@ -779,12 +785,10 @@ function rootGoalSatisfied(spec: CampaignSpec, storage: StorageService, campaign
   if (spec.mode !== "goal_seeking") return false;
   const ref = spec.root_goal.success_predicate_ref;
   if (ref === "sample_recovered") return oracleGoalSatisfied(world);
-  const fact = storage.store.db
-    .prepare(
-      "SELECT id FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'accepted' AND validity = 'current' AND source_grade = 'verified' LIMIT 1",
-    )
-    .get(campaignId, ref);
-  return Boolean(fact);
+  const facts = storage.store.db
+    .prepare("SELECT fact_key, epistemic_status, validity, source_grade FROM facts WHERE campaign_id = ? AND fact_key = ?")
+    .all(campaignId, ref) as { fact_key: string; epistemic_status: string; validity: string; source_grade: string }[];
+  return facts.some((f) => goalFactCanSatisfy(spec, f));
 }
 
 export function restoreEngineData(backupDir: string, destDir: string): RestoreReport {

@@ -3,6 +3,7 @@ import { DomainError, conflict, denied, invalidInput } from "../domain/errors.ts
 import { newId, newCorrelationId } from "../domain/ids.ts";
 import { evalPredicate, type FactLookup } from "../domain/predicates.ts";
 import { defaultStepFingerprint, legacyStepFingerprint, parseProposalOps } from "../domain/proposals.ts";
+import { requiresIndependentGoalVerification } from "../domain/completion.ts";
 import { hashJson } from "../domain/fingerprint.ts";
 import { transitionCampaign, transitionFinding, transitionStep } from "../domain/states.ts";
 import type {
@@ -42,7 +43,7 @@ import {
   type SubmitRunOutcomeResult,
 } from "../contracts/finalization.ts";
 import { SCHEMA_VERSION } from "../version.ts";
-import { confirmFindingIfCurrent } from "../verification/verdict.ts";
+import { applyVerification } from "../verification/verdict.ts";
 import { pickFairReadyStep } from "../scheduler/fair.ts";
 import { ArtifactStore, type StoredArtifact } from "./artifacts.ts";
 import { Store, asJson, fromJson, nowIso } from "./db.ts";
@@ -374,11 +375,15 @@ export class StorageService {
   }
 
   pendingGoalClaim(campaignId: string): { id: string; proposition: string; fact_key: string } | null {
-    const key = this.getCampaign(campaignId).spec.root_goal.success_predicate_ref;
+    const camp = this.getCampaign(campaignId);
+    const key = camp.spec.root_goal.success_predicate_ref;
     if (!key || key === "sample_recovered") return null;
+    // observed-only policies never park a claim for review; derived claims are
+    // inferences, not reviewable observations, on any policy.
+    if (!requiresIndependentGoalVerification(camp.spec)) return null;
     const row = this.store.db
       .prepare(
-        "SELECT id, proposition, fact_key FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'proposed' AND validity = 'current' ORDER BY created_seq DESC LIMIT 1",
+        "SELECT id, proposition, fact_key FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'proposed' AND validity = 'current' AND source_grade != 'derived' ORDER BY created_seq DESC LIMIT 1",
       )
       .get(campaignId, key) as { id: string; proposition: string; fact_key: string } | undefined;
     return row ?? null;
@@ -817,9 +822,13 @@ export class StorageService {
       const id = newId("fact");
       let epistemic: EpistemicStatus = "accepted";
       let submitStatus: SubmitFactResultStatus = "accepted_as_observation";
-      const successKey = this.getCampaign(args.campaign_id).spec.root_goal.success_predicate_ref;
+      const campSpec = this.getCampaign(args.campaign_id).spec;
+      const successKey = campSpec.root_goal.success_predicate_ref;
       const isGoalClaim = Boolean(args.fact_key && args.fact_key === successKey && successKey !== "sample_recovered");
-      if (grade === "derived" || isGoalClaim) {
+      // derived stays proposed everywhere. A root-goal observation parks for
+      // independent acceptance only when the campaign policy asks for it;
+      // otherwise it is a normal accepted observed fact (still never verified).
+      if (grade === "derived" || (isGoalClaim && requiresIndependentGoalVerification(campSpec))) {
         epistemic = "proposed";
         submitStatus = "pending_verification";
       }
@@ -1339,19 +1348,12 @@ export class StorageService {
   projectExecuteOutcome(campaignId: string, run: Record<string, unknown>, outcome: TaskOutcome): void {
     if (run.mode !== "execute") return;
     if (outcome.reason !== "resolved") return;
-    const env = String(
-      (this.getWorld<{ env_rev?: string }>(campaignId, { env_rev: this.getCampaign(campaignId).spec.environment_revision }) as { env_rev?: string })
-        .env_rev ?? this.getCampaign(campaignId).spec.environment_revision,
-    );
     if (String(run.kind) === "verify") {
-      const ids = outcome.finding_ids.length
-        ? outcome.finding_ids
-        : this.list("findings", campaignId)
-            .filter((f) => f.status === "suspected" || f.status === "validating")
-            .map((f) => String(f.id));
-      for (const id of ids) {
-        confirmFindingIfCurrent(this, campaignId, id, env);
-      }
+      // A verify run only affects the finding/finding-candidate it explicitly
+      // names, and only through an explicit model verdict. "Run resolved" plus
+      // "some artifact exists" no longer confirms anything.
+      const vr = outcome.verification_result;
+      if (vr) this.applyTargetedVerification(campaignId, run, vr);
     }
     const stepId = run.step_id ? String(run.step_id) : outcome.step_id;
     if (!stepId) return;
@@ -1367,6 +1369,110 @@ export class StorageService {
       outcome: "no_issue_observed",
       evidence_state: arts > 0 ? "current" : "missing",
     });
+  }
+
+  /**
+   * Apply an explicit verdict to its named target. Necessary conditions only:
+   * the target is this step's declared target, the evidence exists, belongs to
+   * this campaign, is fresh for the current env, and a confirm verdict needs at
+   * least one evidence item produced by this very verify run (independent
+   * reproduction, not re-citing the original claim's evidence). Rejections are
+   * events, never thrown: a bogus verdict must not roll back the run's finish.
+   */
+  private applyTargetedVerification(
+    campaignId: string,
+    run: Record<string, unknown>,
+    vr: { target_id: string; verdict: "confirmed" | "refuted" | "inconclusive"; evidence_refs: string[]; rationale: string },
+  ): void {
+    const reject = (reason: string): void => {
+      this.appendEvent(
+        campaignId,
+        "verification.rejected",
+        { run_id: String(run.id), target_id: vr.target_id, verdict: vr.verdict, reason },
+        { kind: "controller", id: "verify" },
+        String(run.step_id ?? ""),
+      );
+    };
+    const stepId = run.step_id ? String(run.step_id) : null;
+    const step = stepId
+      ? (this.store.db.prepare("SELECT input_refs_json, question FROM steps WHERE id = ? AND campaign_id = ?").get(stepId, campaignId) as
+          | { input_refs_json: string; question: string }
+          | undefined)
+      : undefined;
+    let inputRefs: { id: string }[] = [];
+    try {
+      const parsed = JSON.parse(step?.input_refs_json ?? "[]") as unknown;
+      if (Array.isArray(parsed)) inputRefs = parsed.filter((x): x is { id: string } => Boolean(x && typeof (x as { id?: unknown }).id === "string"));
+    } catch {
+      inputRefs = [];
+    }
+    // Legacy verify steps predate input_refs; fall back to the framed question
+    // "verify <target> via <method>" and still require a same-campaign target.
+    const legacyMatch = step?.question.match(/^verify (\S+) via /);
+    const declared = new Set(inputRefs.map((r) => r.id));
+    if (legacyMatch && declared.size === 0) declared.add(legacyMatch[1]!);
+    if (!declared.has(vr.target_id)) {
+      reject("target_not_declared");
+      return;
+    }
+    if (vr.evidence_refs.length === 0) {
+      reject("missing_evidence");
+      return;
+    }
+    let refsOk: boolean;
+    try {
+      refsOk = this.refsExist(campaignId, vr.evidence_refs);
+    } catch {
+      reject("cross_campaign_evidence");
+      return;
+    }
+    if (!refsOk) {
+      reject("missing_evidence");
+      return;
+    }
+    if (vr.verdict === "confirmed") {
+      const env = String(
+        (this.getWorld<{ env_rev?: string }>(campaignId, { env_rev: this.getCampaign(campaignId).spec.environment_revision }) as {
+          env_rev?: string;
+        }).env_rev ?? this.getCampaign(campaignId).spec.environment_revision,
+      );
+      for (const ref of vr.evidence_refs) {
+        const obs = this.store.db.prepare("SELECT env_rev FROM observations WHERE id = ?").get(ref) as { env_rev: string } | undefined;
+        if (obs && obs.env_rev !== env) {
+          reject("stale_evidence");
+          return;
+        }
+      }
+      const fromThisRun = vr.evidence_refs.some((ref) => {
+        const obs = this.store.db.prepare("SELECT source_run_id FROM observations WHERE id = ?").get(ref) as
+          | { source_run_id: string | null }
+          | undefined;
+        if (obs?.source_run_id === String(run.id)) return true;
+        const art = this.store.db.prepare("SELECT producer_attempt FROM artifacts WHERE id = ?").get(ref) as
+          | { producer_attempt: string | null }
+          | undefined;
+        return art?.producer_attempt === String(run.id);
+      });
+      if (!fromThisRun) {
+        reject("not_independent");
+        return;
+      }
+    }
+    const applied = applyVerification(this, campaignId, vr.target_id, vr.verdict);
+    this.appendEvent(
+      campaignId,
+      "verification.applied",
+      {
+        run_id: String(run.id),
+        target_id: vr.target_id,
+        verdict: vr.verdict,
+        resulting_status: applied,
+        rationale: vr.rationale.slice(0, 400),
+        evidence_refs: vr.evidence_refs,
+      },
+      { kind: "controller", id: "verify" },
+      vr.target_id,
+    );
   }
 
   markFinishRequested(campaignId: string, runId: string, fence: number): void {
@@ -1401,6 +1507,18 @@ export class StorageService {
           args.submission_id,
         );
         return { accepted: false, duplicate: false, conflict: false, outcome: null, error: parsed.error };
+      }
+      if (args.source === "finalizer" && parsed.value.verification_result) {
+        // Finalize ends a fragment; it never mints a first-time verdict.
+        this.appendEvent(
+          args.campaign_id,
+          "verification.dropped_finalizer",
+          { run_id: args.run_id, target_id: parsed.value.verification_result.target_id },
+          { kind: "controller", id: "verify" },
+          args.run_id,
+          args.submission_id,
+        );
+        parsed.value.verification_result = undefined;
       }
       const evidenceErr = this.validateFinishEvidence(args.campaign_id, args.run_id, parsed.value);
       if (evidenceErr) {
@@ -1623,6 +1741,7 @@ export class StorageService {
       next_action: payload.next_action ?? null,
       finish_requested: true,
       protocol_error: null,
+      verification_result: payload.verification_result ?? null,
     };
   }
 
@@ -2164,8 +2283,20 @@ export class StorageService {
         }).seq;
       }
       case "request_verification": {
-        const id = newId("step");
-        void id;
+        // The verify step names its target up front: a verdict later applies to
+        // that target only, never to every pending finding at once.
+        const target = this.store.db
+          .prepare("SELECT revision FROM findings WHERE id = ? AND campaign_id = ?")
+          .get(op.finding_or_fact_id, campaignId) as { revision: number } | undefined;
+        const targetFact = target
+          ? undefined
+          : (this.store.db.prepare("SELECT revision FROM facts WHERE id = ? AND campaign_id = ?").get(op.finding_or_fact_id, campaignId) as
+              | { revision: number }
+              | undefined);
+        const revision = (target ?? targetFact)?.revision;
+        if (revision === undefined) {
+          throw invalidInput("verification_target_missing", `verification target ${op.finding_or_fact_id} not in campaign`);
+        }
         const result = this.proposeStepDirect({
           campaign_id: campaignId,
           producer_id: `ver-${runId}`,
@@ -2181,6 +2312,7 @@ export class StorageService {
           fingerprint: createHash("sha256").update(`verify|${op.finding_or_fact_id}|${op.method}`).digest("hex").slice(0, 32),
           reopen_rule: { kind: "never" },
           priority: 10,
+          input_refs: [{ id: op.finding_or_fact_id, revision }],
         });
         Object.assign(ids, result.canonical_ids);
         return result.seq;

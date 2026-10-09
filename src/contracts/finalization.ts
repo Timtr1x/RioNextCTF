@@ -1,4 +1,4 @@
-import type { TaskOutcome, TaskOutcomeReason, WakeCondition } from "../domain/types.ts";
+import type { TaskOutcome, TaskOutcomeReason, VerificationResult, WakeCondition } from "../domain/types.ts";
 
 export type WorkerPhase = "primary" | "finalizing" | "settled";
 
@@ -25,6 +25,18 @@ export interface FinishStepInput {
   reopen_condition?: string;
   reopen_rule?: WakeCondition;
   next_action?: string;
+  /** Verify runs only: an explicit verdict on the step's target. */
+  verification_result?: VerificationResult;
+}
+
+export function parseVerificationResult(raw: unknown): VerificationResult | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.target_id !== "string" || !p.target_id) return undefined;
+  if (p.verdict !== "confirmed" && p.verdict !== "refuted" && p.verdict !== "inconclusive") return undefined;
+  const evidence_refs = Array.isArray(p.evidence_refs) ? p.evidence_refs.filter((x): x is string => typeof x === "string") : [];
+  const rationale = typeof p.rationale === "string" ? p.rationale.slice(0, 4000) : "";
+  return { target_id: p.target_id, verdict: p.verdict, evidence_refs: evidence_refs.slice(0, 32), rationale };
 }
 
 export interface FinishPayload extends FinishStepInput {
@@ -156,6 +168,7 @@ export function parseFinishInput(raw: unknown): { ok: true; value: FinishStepInp
       reopen_condition,
       reopen_rule: reopen_rule ?? undefined,
       next_action,
+      verification_result: parseVerificationResult(p.verification_result),
     },
   };
 }
@@ -188,6 +201,14 @@ export function canonicalizeFinishPayload(p: FinishStepInput): string {
     reopen_condition: p.reopen_condition ?? null,
     reopen_rule: p.reopen_rule ?? null,
     next_action: p.next_action ?? null,
+    verification_result: p.verification_result
+      ? {
+          target_id: p.verification_result.target_id,
+          verdict: p.verification_result.verdict,
+          evidence_refs: [...p.verification_result.evidence_refs].sort(),
+          rationale: p.verification_result.rationale,
+        }
+      : null,
   });
 }
 

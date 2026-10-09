@@ -1,5 +1,6 @@
 import type {
   CampaignMode,
+  CampaignSpec,
   CampaignState,
   CoverageApplicability,
   CoverageEvidenceState,
@@ -8,6 +9,28 @@ import type {
   FindingStatus,
   StepStatus,
 } from "./types.ts";
+
+/** One place that decides whether the root goal needs independent acceptance. */
+export function requiresIndependentGoalVerification(spec: CampaignSpec): boolean {
+  return Boolean(spec.verification_policy.require_independent_verify);
+}
+
+/**
+ * One place that decides whether a fact satisfies the root goal. observed-only
+ * policies accept observed/verified grades; the independent policy requires
+ * verified. derived never satisfies directly on either.
+ */
+export function goalFactCanSatisfy(
+  spec: CampaignSpec,
+  fact: { fact_key: string | null; epistemic_status: string; validity: string; source_grade: string },
+): boolean {
+  const ref = spec.root_goal.success_predicate_ref;
+  if (!ref || fact.fact_key !== ref) return false;
+  if (fact.epistemic_status !== "accepted" || fact.validity !== "current") return false;
+  if (fact.source_grade === "derived") return false;
+  if (requiresIndependentGoalVerification(spec)) return fact.source_grade === "verified";
+  return fact.source_grade === "observed" || fact.source_grade === "verified";
+}
 
 export interface CompletionSnapshot {
   mode: CampaignMode;
