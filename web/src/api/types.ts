@@ -91,6 +91,7 @@ export interface CampaignView {
   campaign_id: string;
   state: string;
   active_run: { id: string; mode: string; state: string } | null;
+  active_runs?: { id: string; mode: string; state: string; step_id: string | null }[];
   candidates_ready: number;
   blocked: number;
   budget: BudgetSnapshot;

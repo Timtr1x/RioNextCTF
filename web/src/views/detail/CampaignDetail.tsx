@@ -138,7 +138,12 @@ export function CampaignDetail({ id }: { id: string }): JSX.Element {
         </div>
         <div className="mini mt">
           {view.running ? `本进程运行中 · ${view.running.instance_id}（${fmtTime(view.running.started_at)} 起跑）` : "本进程未在跑"}
-          {" · "}epoch {view.progress_epoch} · {view.active_run ? `active run ${view.active_run.mode} ${view.active_run.id}` : "idle"}
+          {" · "}epoch {view.progress_epoch} ·{" "}
+          {view.active_runs && view.active_runs.length > 0
+            ? `${view.active_runs.length} 个活跃 run：${view.active_runs.map((r) => `${r.mode} ${r.id.slice(0, 14)}`).join("，")}`
+            : view.active_run
+              ? `active run ${view.active_run.mode} ${view.active_run.id}`
+              : "idle"}
           {" · "}更新于 {fmtTime(view.updated_at)}
         </div>
       </div>

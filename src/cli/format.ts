@@ -33,8 +33,13 @@ export function formatStatus(s: Record<string, unknown>): string {
     lines.push(`tokens        ${budget.spent_tokens}/${budget.total_tokens}`);
   }
   if (s.candidates_ready != null) lines.push(`ready steps   ${s.candidates_ready}`);
-  const run = s.active_run as { id?: string; mode?: string; state?: string } | null;
-  if (run) lines.push(`active run    ${run.mode} ${run.state} ${run.id}`);
+  const runs = (s.active_runs as { id?: string; mode?: string; state?: string }[] | undefined) ?? [];
+  if (runs.length > 0) {
+    for (const r of runs) lines.push(`active run    ${r.mode} ${r.state} ${r.id}`);
+  } else {
+    const run = s.active_run as { id?: string; mode?: string; state?: string } | null;
+    if (run) lines.push(`active run    ${run.mode} ${run.state} ${run.id}`);
+  }
   const fin = s.finalization as
     | {
         primary_finish_rate: number | null;
