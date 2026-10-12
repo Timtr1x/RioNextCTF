@@ -327,7 +327,10 @@ test("T28 unique step claim across two connections", () => {
   const campId = "t28";
   leaseFor(e1, campId);
   e1.storage.store.db.prepare("UPDATE campaigns SET execute_lock_owner = NULL WHERE id = ?").run(campId);
-  e1.storage.store.db.prepare("UPDATE steps SET status = 'ready' WHERE campaign_id = ?").run(campId);
+  // freeing a step now also clears its active_run_id (what finishRun/recovery do),
+  // and the earlier attempt's live run still occupies a slot until it settles
+  e1.storage.store.db.prepare("UPDATE steps SET status = 'ready', active_run_id = NULL WHERE campaign_id = ?").run(campId);
+  e1.storage.store.db.prepare("UPDATE task_runs SET state = 'finished' WHERE campaign_id = ? AND mode = 'execute'").run(campId);
   const a = e1.storage.claimNextStep(campId, "w1", 10);
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
   const b = e2.storage.claimNextStep(campId, "w2", 10);

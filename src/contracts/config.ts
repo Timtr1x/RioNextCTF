@@ -11,7 +11,8 @@ export interface RuntimeConfig {
   artifact_root: string;
   instance_id: string;
   max_concurrent_decide_per_campaign: 1;
-  max_concurrent_execute: 1;
+  /** Host-level cap on simultaneously active execute runs this process drives. */
+  max_concurrent_execute: number;
   pi_tool_execution: "sequential";
   max_decide_turns: number;
   max_execute_turns_per_run: number;
@@ -114,8 +115,8 @@ export function validateStartupInput(spec: unknown, runtime: RuntimeConfig): Cam
   if (runtime.pi_tool_execution !== "sequential") {
     throw invalidInput("tool_execution", "P0 requires sequential toolExecution");
   }
-  if (runtime.max_concurrent_execute !== 1) {
-    throw invalidInput("execute_slot", "P0 requires a single Execute slot");
+  if (!Number.isInteger(runtime.max_concurrent_execute) || runtime.max_concurrent_execute < 1) {
+    throw invalidInput("execute_slot", "max_concurrent_execute must be an integer >= 1");
   }
   if (runtime.automatic_model_fallback) {
     throw invalidInput("model_fallback", "automatic model fallback is disabled");

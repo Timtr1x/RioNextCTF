@@ -150,6 +150,16 @@ export function validateCampaignSpec(input: unknown): CampaignSpec {
     },
     environment_revision: requireString(raw, "environment_revision"),
   };
+  if (raw.execution_policy !== undefined && raw.execution_policy !== null) {
+    const ep = requireObject(raw, "execution_policy");
+    const workers = ep.max_execute_workers;
+    if (workers !== undefined && workers !== null) {
+      if (typeof workers !== "number" || !Number.isInteger(workers) || workers < 1 || workers > 8) {
+        throw invalidInput("invalid_execution_policy", "execution_policy.max_execute_workers must be an integer in 1..8");
+      }
+      spec.execution_policy = { max_execute_workers: workers };
+    }
+  }
   const challenge = parseChallengeInfo(raw.challenge);
   if (challenge) {
     // A declared live web target must be backed by an explicit scope entry;

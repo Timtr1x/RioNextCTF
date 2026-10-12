@@ -199,6 +199,9 @@ export interface CampaignSpec {
   environment_revision: string;
   /** Present only for campaigns created from --input (local CTF attachments). */
   challenge?: ChallengeInfo;
+  /** Optional parallelism for this campaign's Execute fragments. Absent = 1
+   *  (legacy behavior). First version supports at most 2. */
+  execution_policy?: { max_execute_workers?: number };
 }
 
 export interface CampaignRecord {

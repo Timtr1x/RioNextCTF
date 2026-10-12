@@ -1213,6 +1213,13 @@ export class StorageService {
       .run(newId("dec"), campaignId, runId, reason, nowIso());
   }
 
+  /**
+   * Claim one ready step with a fresh run. Admission authority is the live run
+   * set (claimed/running, not yet expired) capped by the campaign's
+   * execution_policy, plus a per-step CAS: a step runs at most one active run.
+   * The legacy campaigns.execute_* fields are still written for old readers but
+   * no longer gate admission.
+   */
   claimNextStep(campaignId: string, owner: string, fenceSeed: number, leaseMs = 60 * 60_000): { step_id: string; run_id: string; fence: number; kind: StepKind; question: string; attempt_no: number } | null {
     return this.store.transaction(() => {
       if (!this.admissionOpen(campaignId)) return null;
@@ -1220,10 +1227,15 @@ export class StorageService {
       if (camp.state === "cancelled" || camp.state === "paused" || camp.state === "budget_paused" || camp.state === "completed") {
         return null;
       }
-      const lock = this.store.db.prepare("SELECT execute_lock_owner FROM campaigns WHERE id = ?").get(campaignId) as
-        | { execute_lock_owner: string | null }
-        | undefined;
-      if (lock?.execute_lock_owner) return null;
+      const maxWorkers = Math.max(1, Math.min(8, camp.spec.execution_policy?.max_execute_workers ?? 1));
+      const live = Number(
+        (this.store.db
+          .prepare(
+            "SELECT COUNT(*) AS c FROM task_runs WHERE campaign_id = ? AND mode = 'execute' AND state IN ('claimed','running') AND deadline_ms > ?",
+          )
+          .get(campaignId, Date.now()) as { c: number }).c,
+      );
+      if (live >= maxWorkers) return null;
       this.recomputeStepReadiness(campaignId);
       const fairId = pickFairReadyStep(this, campaignId);
       const step = fairId
@@ -1243,9 +1255,14 @@ export class StorageService {
       transitionStep("ready", "leased");
       const now = nowIso();
       const attempt = step.attempt_count + 1;
-      this.store.db
-        .prepare("UPDATE steps SET status = 'leased', attempt_count = ?, last_served_at = ?, revision = revision + 1, updated_seq = updated_seq WHERE id = ?")
-        .run(attempt, now, step.id);
+      // Per-step CAS: same step, same revision, no active run — otherwise the
+      // claim loses to a concurrent claimer and no worker starts.
+      const cas = this.store.db
+        .prepare(
+          "UPDATE steps SET status = 'leased', attempt_count = ?, last_served_at = ?, revision = revision + 1, updated_seq = updated_seq WHERE id = ? AND status = 'ready' AND revision = ? AND (active_run_id IS NULL OR active_run_id = '')",
+        )
+        .run(attempt, now, step.id, step.revision);
+      if (Number(cas.changes) === 0) return null;
       const runId = newId("run");
       const fence = fenceSeed + attempt;
       this.store.db
