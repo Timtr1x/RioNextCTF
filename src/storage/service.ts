@@ -43,7 +43,7 @@ import {
   type SubmitRunOutcomeResult,
 } from "../contracts/finalization.ts";
 import { SCHEMA_VERSION } from "../version.ts";
-import { applyVerification } from "../verification/verdict.ts";
+import { applyFactVerdict, applyVerification } from "../verification/verdict.ts";
 import { pickFairReadyStep } from "../scheduler/fair.ts";
 import { ArtifactStore, type StoredArtifact } from "./artifacts.ts";
 import { Store, asJson, fromJson, nowIso } from "./db.ts";
@@ -1442,20 +1442,54 @@ export class StorageService {
           | { input_refs_json: string; question: string }
           | undefined)
       : undefined;
-    let inputRefs: { id: string }[] = [];
+    let inputRefs: { id: string; revision?: number }[] = [];
     try {
       const parsed = JSON.parse(step?.input_refs_json ?? "[]") as unknown;
-      if (Array.isArray(parsed)) inputRefs = parsed.filter((x): x is { id: string } => Boolean(x && typeof (x as { id?: unknown }).id === "string"));
+      if (Array.isArray(parsed)) {
+        inputRefs = parsed.filter((x): x is { id: string; revision?: number } => Boolean(x && typeof (x as { id?: unknown }).id === "string"));
+      }
     } catch {
       inputRefs = [];
     }
     // Legacy verify steps predate input_refs; fall back to the framed question
     // "verify <target> via <method>" and still require a same-campaign target.
     const legacyMatch = step?.question.match(/^verify (\S+) via /);
+    const legacyCompat = !legacyMatch ? null : { id: legacyMatch[1]!, from: "framed_question" };
     const declared = new Set(inputRefs.map((r) => r.id));
-    if (legacyMatch && declared.size === 0) declared.add(legacyMatch[1]!);
+    if (legacyCompat && declared.size === 0) declared.add(legacyCompat.id);
     if (!declared.has(vr.target_id)) {
       reject("target_not_declared");
+      return;
+    }
+    // Dispatch on the actual target table; the model never names one.
+    const findingRow = this.store.db
+      .prepare("SELECT revision FROM findings WHERE id = ? AND campaign_id = ?")
+      .get(vr.target_id, campaignId) as { revision: number } | undefined;
+    const factRow = findingRow
+      ? undefined
+      : (this.store.db.prepare("SELECT revision, fact_key FROM facts WHERE id = ? AND campaign_id = ?").get(vr.target_id, campaignId) as
+          | { revision: number; fact_key: string | null }
+          | undefined);
+    if (!findingRow && !factRow) {
+      reject("target_not_found");
+      return;
+    }
+    // Version check: a verdict written against revision N must not land on N+k.
+    // Legacy steps recorded no revision; say so honestly instead of pretending.
+    const declaredRef = inputRefs.find((r) => r.id === vr.target_id);
+    const currentRevision = (findingRow ?? factRow)!.revision;
+    if (declaredRef?.revision !== undefined && declaredRef.revision !== currentRevision) {
+      reject("target_revision_changed");
+      return;
+    }
+    // A model verdict never substitutes for external flag acceptance.
+    const spec = this.getCampaign(campaignId).spec;
+    if (
+      factRow?.fact_key &&
+      factRow.fact_key === spec.root_goal.success_predicate_ref &&
+      requiresIndependentGoalVerification(spec)
+    ) {
+      reject("goal_external_acceptance");
       return;
     }
     if (vr.evidence_refs.length === 0) {
@@ -1472,6 +1506,16 @@ export class StorageService {
     if (!refsOk) {
       reject("missing_evidence");
       return;
+    }
+    // Fact evidence must itself be usable: not retracted, stale or disputed.
+    for (const ref of vr.evidence_refs) {
+      const ef = this.store.db.prepare("SELECT epistemic_status, validity FROM facts WHERE id = ?").get(ref) as
+        | { epistemic_status: string; validity: string }
+        | undefined;
+      if (ef && (ef.validity !== "current" || ef.epistemic_status === "disputed" || ef.epistemic_status === "retracted")) {
+        reject("unusable_fact_evidence");
+        return;
+      }
     }
     if (vr.verdict === "confirmed") {
       const env = String(
@@ -1501,17 +1545,23 @@ export class StorageService {
         return;
       }
     }
-    const applied = applyVerification(this, campaignId, vr.target_id, vr.verdict);
+    const applied = findingRow
+      ? applyVerification(this, campaignId, vr.target_id, vr.verdict)
+      : JSON.stringify(
+          applyFactVerdict(this, campaignId, vr.target_id, vr.verdict as "confirmed" | "refuted" | "inconclusive", vr.evidence_refs),
+        );
     this.appendEvent(
       campaignId,
       "verification.applied",
       {
         run_id: String(run.id),
         target_id: vr.target_id,
+        target_kind: findingRow ? "finding" : "fact",
         verdict: vr.verdict,
         resulting_status: applied,
         rationale: vr.rationale.slice(0, 400),
         evidence_refs: vr.evidence_refs,
+        revision_checked: declaredRef?.revision !== undefined,
       },
       { kind: "controller", id: "verify" },
       vr.target_id,

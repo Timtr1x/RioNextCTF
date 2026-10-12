@@ -341,3 +341,127 @@ test("V15: the same verdict re-applied is idempotent", () => {
   assert.equal(eventsAfter, eventsBefore, "replayed finish does not re-apply the verdict");
   e.close();
 });
+
+// --- R01: fact-targeted verdicts and run settlement ---
+
+function seedGoalFact(e: Engine, campaignId: string, runId: string, factKey: string, proposition: string): string {
+  const obs = seedEvidence(e, campaignId, runId);
+  const f = e.storage.submitFact({
+    campaign_id: campaignId,
+    producer_id: "t",
+    submission_id: `fact-${factKey}-${Math.random().toString(16).slice(2)}`,
+    run_id: runId,
+    proposition,
+    fact_key: factKey,
+    support_refs: [obs],
+    conditions: {},
+  });
+  return f.canonical_ids.fact_id!;
+}
+
+test("R01-01/02: fact verdicts apply through the fact path and settle the run", () => {
+  const e = boot("r01a", (spec) => {
+    spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
+  });
+  const decide = e.storage.claimDecide("r01a", "t")!;
+  const factId = seedGoalFact(e, "r01a", decide.run_id, "backup_readable", "backup endpoint is readable");
+  const run = claimVerifyRun(e, "r01a", factId, decide.run_id);
+  const fresh = seedEvidence(e, "r01a", run.run_id);
+  finishVerify(e, "r01a", run, {
+    disposition: "resolved",
+    summary: "reproduced",
+    evidence_refs: [fresh],
+    verification_result: { target_id: factId, verdict: "confirmed", evidence_refs: [fresh], rationale: "reproduced" },
+  });
+  const fact = e.storage.list("facts", "r01a").find((f) => f.id === factId)!;
+  assert.equal(fact.source_grade, "verified", "controlled path may mark verified");
+  assert.equal(fact.epistemic_status, "accepted");
+  assert.match(String(fact.support_refs_json), new RegExp(fresh));
+  // the run settled instead of wedging on 'finding not found'
+  assert.equal(e.storage.getRun(run.run_id).end_reason, "resolved");
+  e.close();
+
+  // refuted / inconclusive take the fact path too
+  const e2 = boot("r01b", (spec) => {
+    spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
+  });
+  const d2 = e2.storage.claimDecide("r01b", "t")!;
+  const factId2 = seedGoalFact(e2, "r01b", d2.run_id, "xss_present", "xss exists");
+  const r2 = claimVerifyRun(e2, "r01b", factId2, d2.run_id);
+  const fresh2 = seedEvidence(e2, "r01b", r2.run_id);
+  finishVerify(e2, "r01b", r2, {
+    disposition: "resolved",
+    summary: "counter evidence",
+    evidence_refs: [fresh2],
+    verification_result: { target_id: factId2, verdict: "refuted", evidence_refs: [fresh2], rationale: "payload escaped" },
+  });
+  const fact2 = e2.storage.list("facts", "r01b").find((f) => f.id === factId2)!;
+  assert.equal(fact2.epistemic_status, "disputed");
+  assert.match(String(fact2.counter_refs_json), new RegExp(fresh2));
+  e2.close();
+});
+
+test("R01-04: a verdict against a stale target revision is rejected, the run still settles", () => {
+  const e = boot("r01c", (spec) => {
+    spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
+  });
+  const decide = e.storage.claimDecide("r01c", "t")!;
+  const factId = seedGoalFact(e, "r01c", decide.run_id, "key_x", "claim v1");
+  const run = claimVerifyRun(e, "r01c", factId, decide.run_id);
+  // target moved on between request and finish
+  e.storage.store.db.prepare("UPDATE facts SET revision = revision + 1 WHERE id = ?").run(factId);
+  const fresh = seedEvidence(e, "r01c", run.run_id);
+  finishVerify(e, "r01c", run, {
+    disposition: "resolved",
+    summary: "stale verdict",
+    evidence_refs: [fresh],
+    verification_result: { target_id: factId, verdict: "confirmed", evidence_refs: [fresh], rationale: "stale" },
+  });
+  const rejected = e.storage.list("events", "r01c").filter((ev) => ev.type === "verification.rejected");
+  assert.equal(rejected.length, 1);
+  assert.match(String(rejected[0]!.payload_json), /target_revision_changed/);
+  const fact = e.storage.list("facts", "r01c").find((f) => f.id === factId)!;
+  assert.equal(fact.source_grade, "observed", "untouched by the stale verdict");
+  assert.equal(e.storage.getRun(run.run_id).state, "finished");
+  e.close();
+});
+
+test("R01-05: a missing target is rejected with an event and the slot frees", () => {
+  const e = boot("r01d", (spec) => {
+    spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
+  });
+  const decide = e.storage.claimDecide("r01d", "t")!;
+  const factId = seedGoalFact(e, "r01d", decide.run_id, "key_y", "claim");
+  const run = claimVerifyRun(e, "r01d", factId, decide.run_id);
+  const fresh = seedEvidence(e, "r01d", run.run_id);
+  finishVerify(e, "r01d", run, {
+    disposition: "resolved",
+    summary: "wrong target",
+    evidence_refs: [fresh],
+    verification_result: { target_id: "fact_missing", verdict: "confirmed", evidence_refs: [fresh], rationale: "gone" },
+  });
+  const rejected = e.storage.list("events", "r01d").filter((ev) => ev.type === "verification.rejected");
+  assert.equal(rejected.length, 1);
+  assert.equal(e.storage.getRun(run.run_id).state, "finished");
+  e.close();
+});
+
+test("R01-08: a model verdict never substitutes for external flag acceptance", () => {
+  const e = boot("r01e"); // strict policy: require_independent_verify = true
+  const decide = e.storage.claimDecide("r01e", "t")!;
+  const flagFact = seedGoalFact(e, "r01e", decide.run_id, "flag_recovered", "flag{maybe}");
+  const run = claimVerifyRun(e, "r01e", flagFact, decide.run_id);
+  const fresh = seedEvidence(e, "r01e", run.run_id);
+  finishVerify(e, "r01e", run, {
+    disposition: "resolved",
+    summary: "model says the flag works",
+    evidence_refs: [fresh],
+    verification_result: { target_id: flagFact, verdict: "confirmed", evidence_refs: [fresh], rationale: "looks right" },
+  });
+  const fact = e.storage.list("facts", "r01e").find((f) => f.id === flagFact)!;
+  assert.notEqual(fact.source_grade, "verified", "model verdict does not verify the goal flag");
+  const rejected = e.storage.list("events", "r01e").filter((ev) => ev.type === "verification.rejected");
+  assert.equal(rejected.length, 1);
+  assert.match(String(rejected[0]!.payload_json), /goal_external_acceptance/);
+  e.close();
+});
