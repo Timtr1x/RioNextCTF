@@ -641,7 +641,7 @@ export class Engine {
         id: f.id,
         claim: f.claim,
         status: f.status,
-        evidence_refs: f.evidence_refs_json,
+        evidence_refs: JSON.parse(String(f.evidence_refs_json ?? "[]")) as string[],
       })),
       coverage: coverage.map((c) => ({
         obligation: c.obligation,

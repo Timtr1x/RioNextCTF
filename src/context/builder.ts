@@ -11,6 +11,7 @@ import {
   KALI_BACKGROUND_BINS,
   resolveToolCapabilities,
 } from "../tools/kali-profile.ts";
+import { deliveryRequirements } from "../domain/completion.ts";
 import { buildModelGraphView } from "./model-view.ts";
 import { PROMPT_VERSION } from "../version.ts";
 import { readFileSync } from "node:fs";
@@ -272,6 +273,7 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
       ...(coverage ? { coverage: coverage.items } : {}),
       observations: observations.items,
     },
+    delivery_requirements: deliveryRequirements(camp.spec),
     recent_results: recentResults(storage, lease.campaign_id),
     hints,
     pending_goal_claim: storage.pendingGoalClaim(lease.campaign_id),

@@ -28,6 +28,30 @@ export function goalClaimReviewable(spec: CampaignSpec): boolean {
 }
 
 /**
+ * Short human-facing delivery summary for the model, derived from the parsed
+ * policy — never the whole control surface.
+ */
+export function deliveryRequirements(spec: CampaignSpec): string[] {
+  if (spec.mode === "goal_seeking") {
+    return goalClaimReviewable(spec)
+      ? ["命中根目标的事实只算候选：需人工或平台外部验收后才完成。"]
+      : ["根目标凭 accepted+current 的观察事实完成（不标独立验收）；derived 推断不能直接完成。"];
+  }
+  const out = ["评估任务：按覆盖义务与发现状态交付，不找 flag。"];
+  out.push(
+    confirmedFindingsRequired(spec.mode, spec.verification_policy.require_confirmed_findings)
+      ? "发现必须验证到 confirmed 才能交付。"
+      : "候选发现可交付，须如实标注状态与依据。",
+  );
+  out.push(
+    completeCoverageRequired(spec.mode, spec.coverage_policy.require_complete)
+      ? "mandatory 覆盖义务必须有当前环境证据的测试结果；stale/inconclusive 不算完成。"
+      : "允许有界交付，报告如实列出未覆盖项。",
+  );
+  return out;
+}
+
+/**
  * One place that decides whether a fact satisfies the root goal. observed-only
  * policies accept observed/verified grades; the independent policy requires
  * verified. derived never satisfies directly on either.
