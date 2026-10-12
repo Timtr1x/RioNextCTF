@@ -172,3 +172,116 @@ test("demo specs round-trip the optional delivery fields", () => {
   e.close();
   e2.close();
 });
+
+// --- R02: assessment never parks at the root-goal human review ---
+
+test("R02-01/02: assessment matching facts are ordinary facts, derived stays inference", () => {
+  const dir = tmp();
+  const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
+  const spec = loadAssessmentSpec("r02");
+  spec.verification_policy = { ...spec.verification_policy, require_independent_verify: true };
+  e.createCampaign(spec);
+  e.storage.setCampaignState("r02", "active", { kind: "user", id: "t" });
+  const run = e.storage.claimDecide("r02", "t")!;
+  const obs = e.storage.recordObservation({
+    campaign_id: "r02",
+    producer_id: "t",
+    submission_id: "o1",
+    run_id: run.run_id,
+    attempt_id: run.run_id,
+    subject: "note",
+    body: { ok: true },
+    artifact_refs: [],
+    conditions: {},
+    env_rev: "env-1",
+  });
+  const obsId = obs.canonical_ids.observation_id!;
+  const matched = e.storage.submitFact({
+    campaign_id: "r02",
+    producer_id: "t",
+    submission_id: "m1",
+    run_id: run.run_id,
+    proposition: "coverage complete per evidence",
+    fact_key: "coverage_complete", // the assessment success predicate
+    support_refs: [obsId],
+    conditions: {},
+  });
+  assert.equal(matched.extra?.submit_status, "accepted_as_observation", "no parking for assessments");
+  assert.equal(e.storage.pendingGoalClaim("r02"), null);
+  assert.equal(e.storage.getCampaign("r02").state, "active");
+
+  const derived = e.storage.submitFact({
+    campaign_id: "r02",
+    producer_id: "t",
+    submission_id: "d1",
+    run_id: run.run_id,
+    proposition: "inferred, not observed",
+    fact_key: "coverage_complete",
+    support_refs: [obsId],
+    conditions: {},
+    source_grade: "derived",
+  });
+  assert.equal(derived.extra?.submit_status, "pending_verification", "derived still parks as inference");
+  assert.equal(e.storage.pendingGoalClaim("r02"), null, "derived inferences never reach the review queue");
+  e.close();
+});
+
+test("R02-03: a strict goal_seeking flag claim still parks", () => {
+  const dir = tmp();
+  const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
+  const spec = loadDemoSpec("r02c");
+  spec.root_goal = { ...spec.root_goal, success_predicate_ref: "flag_recovered" };
+  e.createCampaign(spec);
+  e.storage.setCampaignState("r02c", "active", { kind: "user", id: "t" });
+  const run = e.storage.claimDecide("r02c", "t")!;
+  const obs = e.storage.recordObservation({
+    campaign_id: "r02c",
+    producer_id: "t",
+    submission_id: "o1",
+    run_id: run.run_id,
+    attempt_id: run.run_id,
+    subject: "note",
+    body: { flag: "flag{x}" },
+    artifact_refs: [],
+    conditions: {},
+    env_rev: "env-1",
+  });
+  e.storage.submitFact({
+    campaign_id: "r02c",
+    producer_id: "t",
+    submission_id: "f1",
+    run_id: run.run_id,
+    proposition: "flag{x}",
+    fact_key: "flag_recovered",
+    support_refs: [obs.canonical_ids.observation_id!],
+    conditions: {},
+  });
+  assert.ok(e.storage.pendingGoalClaim("r02c"), "CTF claim still parks for external acceptance");
+  e.close();
+});
+
+test("R02-06/07: repair un-parks a mis-parked assessment, never a CTF flag campaign", () => {
+  const dir = tmp();
+  const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
+  const spec = loadAssessmentSpec("r02r");
+  e.createCampaign(spec);
+  e.storage.setCampaignState("r02r", "active", { kind: "user", id: "t" });
+  // simulate the old mis-park: awaiting_verify with no real review intent
+  e.storage.persistPause("r02r", { kind: "controller", id: "engine" }, "awaiting_verify");
+  const repaired = e.repair("r02r");
+  assert.equal(repaired.repaired, true);
+  assert.equal(e.storage.getCampaign("r02r").state, "active");
+  const events = e.storage.list("events", "r02r").filter((ev) => ev.type === "campaign.repaired");
+  assert.equal(events.length, 1);
+
+  // a CTF goal campaign at awaiting_verify is not touched
+  const ctf = loadDemoSpec("r02ctf");
+  ctf.root_goal = { ...ctf.root_goal, success_predicate_ref: "flag_recovered" };
+  e.createCampaign(ctf);
+  e.storage.setCampaignState("r02ctf", "active", { kind: "user", id: "t" });
+  e.storage.persistPause("r02ctf", { kind: "controller", id: "engine" }, "awaiting_verify");
+  const refused = e.repair("r02ctf");
+  assert.equal(refused.repaired, false);
+  assert.equal(e.storage.getCampaign("r02ctf").state, "awaiting_verify");
+  e.close();
+});

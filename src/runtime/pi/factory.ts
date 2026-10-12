@@ -12,6 +12,7 @@ import {
   type WorkerPhase,
 } from "../../contracts/finalization.ts";
 import type { ContextPack, WorkerFactory, WorkerRuntime } from "../../contracts/worker-runtime.ts";
+import { goalClaimReviewable } from "../../domain/completion.ts";
 import { DomainError } from "../../domain/errors.ts";
 import { newId } from "../../domain/ids.ts";
 import type { ReadSetEntry, RunLease, TaskOutcome, WorkerMode } from "../../domain/types.ts";
@@ -55,6 +56,23 @@ export class PiWorkerFactory implements WorkerFactory {
   create(mode: WorkerMode, run_id: string): WorkerRuntime {
     return new PiWorker(mode, run_id, this.deps);
   }
+}
+
+/** submit_fact description follows the task's actual acceptance policy. */
+function submitFactDescription(storage: FactoryDeps["storage"], lease: RunLease): string {
+  let spec: { mode: string; root_goal: { success_predicate_ref: string }; verification_policy: { require_independent_verify: boolean } };
+  try {
+    spec = storage.getCampaign(lease.campaign_id).spec;
+  } catch {
+    return "Submit a fact.";
+  }
+  if (goalClaimReviewable(spec as never)) {
+    return `Submit a fact. A fact keyed ${spec.root_goal.success_predicate_ref} is only a candidate until external acceptance (human or platform judgement).`;
+  }
+  if (spec.mode === "goal_seeking") {
+    return "Submit a fact. This task completes on observed evidence: an accepted current observation fact matching the goal predicate satisfies it. derived inferences never satisfy it directly.";
+  }
+  return "Submit a fact. Assessment facts are delivery input; they never park the campaign for goal review.";
 }
 
 export class PiWorker implements WorkerRuntime {
@@ -720,7 +738,7 @@ export class PiWorker implements WorkerRuntime {
           this.recordSubmit("obs", result.canonical_ids.observation_id);
           return ok(result);
         }),
-        tool("submit_fact", "Submit a fact. A success-predicate fact (e.g. flag_recovered) is only a candidate until a human verifies it.", Type.Object({
+        tool("submit_fact", submitFactDescription(this.deps.storage, lease), Type.Object({
           proposition: Type.String(),
           fact_key: Type.Optional(Type.String()),
           support_refs: Type.Array(Type.String()),

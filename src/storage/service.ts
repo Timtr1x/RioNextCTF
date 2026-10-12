@@ -3,7 +3,7 @@ import { DomainError, conflict, denied, invalidInput } from "../domain/errors.ts
 import { newId, newCorrelationId } from "../domain/ids.ts";
 import { evalPredicate, type FactLookup } from "../domain/predicates.ts";
 import { defaultStepFingerprint, legacyStepFingerprint, parseProposalOps } from "../domain/proposals.ts";
-import { requiresIndependentGoalVerification } from "../domain/completion.ts";
+import { goalClaimReviewable, requiresIndependentGoalVerification } from "../domain/completion.ts";
 import { hashJson } from "../domain/fingerprint.ts";
 import { transitionCampaign, transitionFinding, transitionStep } from "../domain/states.ts";
 import type {
@@ -347,6 +347,39 @@ export class StorageService {
     });
   }
 
+  /**
+   * Controlled repair for assessments mis-parked at awaiting_verify by the old
+   * mode-crosstalk bug (a matching observation created a pending goal claim and
+   * the loop paused for a human). Refuses anything with open external effects
+   * or a non-assessment task; never accepts the claim, never completes.
+   */
+  repairMisParkedAssessment(id: string, actor: Actor): { repaired: boolean; reason: string } {
+    return this.store.transaction(() => {
+      const camp = this.getCampaign(id);
+      if (camp.spec.mode !== "assessment") return { repaired: false, reason: "not_assessment" };
+      if (camp.state !== "awaiting_verify") return { repaired: false, reason: "not_awaiting_verify" };
+      const inFlight = Number(
+        (this.store.db
+          .prepare("SELECT COUNT(*) AS c FROM task_runs WHERE campaign_id = ? AND state IN ('claimed','running')")
+          .get(id) as { c: number }).c,
+      );
+      const uncertain = Number(
+        (this.store.db.prepare("SELECT COUNT(*) AS c FROM invocations WHERE campaign_id = ? AND state = 'uncertain'").get(id) as { c: number }).c,
+      );
+      if (inFlight > 0 || uncertain > 0) return { repaired: false, reason: "external_effects_open" };
+      this.store.db
+        .prepare("UPDATE campaigns SET state = 'active', admission_open = 1, epoch = epoch + 1, updated_at = ? WHERE id = ?")
+        .run(nowIso(), id);
+      this.appendEvent(
+        id,
+        "campaign.repaired",
+        { from: "awaiting_verify", to: "active", reason: "mis_parked_assessment_r02" },
+        actor,
+      );
+      return { repaired: true, reason: "mis_parked_assessment" };
+    });
+  }
+
   persistResume(id: string, actor: Actor): void {
     this.store.transaction(() => {
       const camp = this.getCampaign(id);
@@ -377,10 +410,10 @@ export class StorageService {
   pendingGoalClaim(campaignId: string): { id: string; proposition: string; fact_key: string } | null {
     const camp = this.getCampaign(campaignId);
     const key = camp.spec.root_goal.success_predicate_ref;
-    if (!key || key === "sample_recovered") return null;
-    // observed-only policies never park a claim for review; derived claims are
+    // only goal_seeking under the strict policy parks claims; observed-only
+    // policies, assessments and synthetic oracles never do. derived claims are
     // inferences, not reviewable observations, on any policy.
-    if (!requiresIndependentGoalVerification(camp.spec)) return null;
+    if (!goalClaimReviewable(camp.spec)) return null;
     const row = this.store.db
       .prepare(
         "SELECT id, proposition, fact_key FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'proposed' AND validity = 'current' AND source_grade != 'derived' ORDER BY created_seq DESC LIMIT 1",
@@ -824,11 +857,11 @@ export class StorageService {
       let submitStatus: SubmitFactResultStatus = "accepted_as_observation";
       const campSpec = this.getCampaign(args.campaign_id).spec;
       const successKey = campSpec.root_goal.success_predicate_ref;
-      const isGoalClaim = Boolean(args.fact_key && args.fact_key === successKey && successKey !== "sample_recovered");
+      const isGoalClaim = Boolean(args.fact_key && args.fact_key === successKey);
       // derived stays proposed everywhere. A root-goal observation parks for
-      // independent acceptance only when the campaign policy asks for it;
-      // otherwise it is a normal accepted observed fact (still never verified).
-      if (grade === "derived" || (isGoalClaim && requiresIndependentGoalVerification(campSpec))) {
+      // external acceptance only on goal_seeking tasks under the strict policy;
+      // assessment matches are ordinary facts (still never verified).
+      if (grade === "derived" || (isGoalClaim && goalClaimReviewable(campSpec))) {
         epistemic = "proposed";
         submitStatus = "pending_verification";
       }

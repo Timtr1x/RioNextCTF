@@ -16,6 +16,18 @@ export function requiresIndependentGoalVerification(spec: CampaignSpec): boolean
 }
 
 /**
+ * Whether this task's root-goal claims park for external review. Only
+ * goal_seeking tasks ever park, and only under the strict policy; assessment
+ * matching facts are ordinary facts, and synthetic oracles review themselves.
+ */
+export function goalClaimReviewable(spec: CampaignSpec): boolean {
+  if (spec.mode !== "goal_seeking") return false;
+  const ref = spec.root_goal.success_predicate_ref;
+  if (!ref || ref === "sample_recovered") return false;
+  return requiresIndependentGoalVerification(spec);
+}
+
+/**
  * One place that decides whether a fact satisfies the root goal. observed-only
  * policies accept observed/verified grades; the independent policy requires
  * verified. derived never satisfies directly on either.

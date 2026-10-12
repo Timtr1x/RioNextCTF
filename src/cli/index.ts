@@ -322,6 +322,11 @@ async function main(): Promise<void> {
         }
         break;
       }
+      case "repair": {
+        const result = engine.repair(id);
+        emit(result, json, `repair ${id}: ${result.reason}${result.repaired ? " (back to active)" : ""}`);
+        break;
+      }
       case "revise-budget":
         emit(
           {

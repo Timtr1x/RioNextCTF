@@ -240,6 +240,13 @@ export class Engine {
     return this.storage.persistHint(campaignId, text, { kind: "user", id: "cli" });
   }
 
+  /** Controlled repair for assessments mis-parked at awaiting_verify (R02). */
+  repair(campaignId: string): { repaired: boolean; reason: string } {
+    const result = this.storage.repairMisParkedAssessment(campaignId, { kind: "user", id: "cli" });
+    this.log(`repair ${campaignId}: ${result.reason}`);
+    return result;
+  }
+
   verifyGoal(
     campaignId: string,
     verdict: { accept: boolean; text?: string; factId?: string },
