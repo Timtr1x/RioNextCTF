@@ -89,6 +89,16 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 
 只有一个战役时可以省略 id。
 
+## 并行 Execute（多 Worker）
+
+默认每个战役仍是一个 Execute 片段。要并行，给 spec 加：
+
+```json
+"execution_policy": { "max_execute_workers": 2 }
+```
+
+并把宿主上限抬高（默认 1）：RuntimeConfig.max_concurrent_execute。调度是"边界复核"：Decide 只在没有 Execute 在跑时规划；最多 N 个片段并行；新输入到达就停止补充新片段，在途片段跑完后复核。每个 Run 有私有工作目录（/workspace/runs/<run-id>）、独立浏览器会话和结果键；工具超时只杀自己的进程。实现与未验收项见 docs/multiworker.md。
+
 ## 验收策略与完成语义
 
 `verification_policy` / `coverage_policy` 控制战役怎么算完成：
