@@ -25,6 +25,7 @@ export interface ModelStep {
   question: string;
   status: string;
   priority: number;
+  method_family?: string;
   next_action?: string;
   last_failure?: string;
 }
@@ -68,7 +69,6 @@ const ACTIVE_STEP_STATUSES = new Set(["proposed", "ready", "leased", "running", 
 const CLAIM_CAP = 400;
 const QUESTION_CAP = 300;
 const STATEMENT_CAP = 400;
-const STEP_CAP = 60;
 const FACT_CAP = 60;
 const FINDING_CAP = 40;
 
@@ -88,6 +88,7 @@ interface StepRow {
   question: string;
   status: string;
   priority: number;
+  method_family: string | null;
   next_action: string | null;
   last_failure: string | null;
 }
@@ -130,6 +131,7 @@ export function projectStep(row: StepRow): ModelStep {
     status: row.status,
     priority: row.priority,
   };
+  if (row.method_family) out.method_family = row.method_family;
   if (row.next_action) out.next_action = clip(row.next_action, 200);
   if (row.last_failure) out.last_failure = clip(row.last_failure, 200);
   return out;
@@ -222,16 +224,14 @@ export function buildModelGraphView(
 
   const stepRows = db
     .prepare(
-      "SELECT id, revision, question, status, priority, next_action, last_failure FROM steps WHERE campaign_id = ? ORDER BY priority ASC, updated_seq DESC, id ASC",
+      "SELECT id, revision, question, status, priority, method_family, next_action, last_failure FROM steps WHERE campaign_id = ? ORDER BY priority ASC, updated_seq DESC, id ASC",
     )
     .all(campaignId) as unknown as StepRow[];
+  // the whole active frontier fits the soft budget in practice; retired and
+  // resolved history never occupies the overview
   const activeSteps = stepRows.filter((s) => ACTIVE_STEP_STATUSES.has(s.status));
-  const shownSteps = activeSteps.slice(0, STEP_CAP);
+  const shownSteps = activeSteps.slice();
   for (const s of shownSteps) revisions.push({ table: "steps", id: s.id, revision: s.revision });
-  {
-    const entry = omittedEntry("steps", activeSteps.length, shownSteps.length);
-    if (entry) omitted.push(entry);
-  }
 
   const totalFacts = Number((db.prepare("SELECT COUNT(*) AS c FROM facts WHERE campaign_id = ?").get(campaignId) as { c: number }).c);
   const factById = new Map<string, FactRow>();
@@ -266,10 +266,6 @@ export function buildModelGraphView(
     revisions.push({ table: "facts", id: f.id, revision: f.revision });
     return projectFact(f);
   });
-  {
-    const entry = omittedEntry("facts", totalFacts, facts.length);
-    if (entry) omitted.push(entry);
-  }
 
   const findingRows = db
     .prepare("SELECT id, revision, claim, status, evidence_refs_json FROM findings WHERE campaign_id = ? ORDER BY created_seq DESC LIMIT ?")
@@ -296,23 +292,70 @@ export function buildModelGraphView(
     includedRevisions: revisions,
   };
 
-  // Soft budget: shed the oldest fill facts until the graph fits. Linked and
-  // newest facts are inserted first, so trimming from the tail drops the
-  // least relevant ones; counts stay honest.
+  // Soft budget: shed the oldest fill facts first (linked and newest lanes are
+  // protected), then the lowest-priority step tail — never the current step.
+  const linkedCount = linked.ids.length + linked.keys.length;
+  const factFloor = Math.min(linkedCount + 15, totalFacts);
   let guard = 0;
-  while (JSON.stringify(view).length > opts.softBudget && view.facts.length > 0 && guard < 10_000) {
-    const dropped = view.facts.pop()!;
-    const idx = view.includedRevisions.findIndex((r) => r.table === "facts" && r.id === dropped.id);
-    if (idx >= 0) view.includedRevisions.splice(idx, 1);
+  while (JSON.stringify(view).length > opts.softBudget && guard < 10_000) {
+    if (view.facts.length > factFloor && view.facts.length > 0) {
+      const dropped = view.facts.pop()!;
+      const i = view.includedRevisions.findIndex((r) => r.table === "facts" && r.id === dropped.id);
+      if (i >= 0) view.includedRevisions.splice(i, 1);
+    } else if (view.steps.length > 1) {
+      const i = [...view.steps.keys()].reverse().find((i) => view.steps[i]!.id !== (opts.currentStepId ?? null));
+      if (i === undefined) break;
+      const dropped = view.steps.splice(i, 1)[0]!;
+      const ri = view.includedRevisions.findIndex((r) => r.table === "steps" && r.id === dropped.id);
+      if (ri >= 0) view.includedRevisions.splice(ri, 1);
+    } else {
+      break;
+    }
     guard += 1;
   }
-  const idx = view.omitted.findIndex((o) => o.kind === "facts");
-  const finalFactsOmitted = omittedEntry("facts", totalFacts, view.facts.length);
-  if (finalFactsOmitted) {
-    if (idx >= 0) view.omitted[idx] = finalFactsOmitted;
-    else view.omitted.push(finalFactsOmitted);
-  } else if (idx >= 0) {
-    view.omitted.splice(idx, 1);
-  }
+  const omittedFacts = omittedEntry("facts", totalFacts, view.facts.length);
+  if (omittedFacts) view.omitted.push(omittedFacts);
+  const omittedSteps = omittedEntry("steps", activeSteps.length, view.steps.length);
+  if (omittedSteps) view.omitted.push(omittedSteps);
   return view;
+}
+
+/**
+ * graph_query detail reads share the model field semantics with the overview:
+ * business content stays, control columns (source_run_id, revisions, JSON
+ * plumbing) do not come back. The worker records revisions from the raw rows
+ * before this projection runs.
+ */
+export function projectGraphItems(entity: string, items: unknown[]): unknown[] {
+  switch (entity) {
+    case "facts":
+      return items.map((i) => projectFact(i as unknown as FactRow));
+    case "steps":
+      return items.map((i) => projectStep(i as unknown as StepRow));
+    case "findings":
+      return items.map((i) => {
+        const r = i as { id: string; claim: string; status: string; evidence_refs_json: string };
+        return { id: r.id, claim: r.claim, status: r.status, evidence_refs: parseRefs(r.evidence_refs_json ?? "[]") };
+      });
+    case "goals":
+      return items.map((i) => {
+        const r = i as { id: string; statement: string; is_root: number; status: string; parent_id: string | null };
+        return { id: r.id, statement: r.statement, is_root: r.is_root === 1, status: r.status, ...(r.parent_id ? { parent_id: r.parent_id } : {}) };
+      });
+    case "coverage":
+      return items.map((i) => {
+        const r = i as Record<string, unknown>;
+        return {
+          id: r.id,
+          obligation: r.obligation,
+          applicability: r.applicability,
+          execution_state: r.execution_state,
+          outcome: r.outcome,
+          evidence_state: r.evidence_state,
+          mandatory: r.mandatory,
+        };
+      });
+    default:
+      return items;
+  }
 }

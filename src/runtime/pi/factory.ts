@@ -1,6 +1,7 @@
 import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { Type, type TProperties } from "typebox";
 import { loadPrompt } from "../../context/builder.ts";
+import { projectGraphItems } from "../../context/model-view.ts";
 import type { FinalizationConfig } from "../../contracts/finalization.ts";
 import {
   frameworkReason,
@@ -636,8 +637,9 @@ export class PiWorker implements WorkerRuntime {
         const p = params as { entity: string; ids?: string[]; limit?: number; offset?: number; order?: string };
         const order = p.order === "desc" ? "desc" : "asc";
         const result = s.graphQuery(lease.campaign_id, { entity: p.entity, ids: p.ids, limit: p.limit, offset: p.offset, order });
+        // internal read set sees the real revisions; the model sees the projection
         noteGraphReads(p.entity, result.items);
-        return ok(result);
+        return ok({ ...result, items: projectGraphItems(p.entity, result.items) });
       }),
       tool("artifact_read", "Read a byte slice of a saved original. If kali_run set truncated, pass artifact_id and next_offset to get the next chunk.", Type.Object({
         artifact_id: Type.String(),

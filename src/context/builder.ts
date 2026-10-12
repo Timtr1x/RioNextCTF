@@ -202,31 +202,41 @@ function fitObservationBodies(payload: Record<string, unknown>, items: unknown[]
 }
 
 export function buildContextPack(storage: StorageService, lease: RunLease, extra: Record<string, unknown> = {}): ContextPack {
+  // One short transaction: graph view, evidence previews, hints, checkpoint,
+  // budget and the current step all come from the same consistent snapshot.
   const camp = storage.getCampaign(lease.campaign_id);
-  // One short transaction: the whole initial view is a consistent snapshot.
-  const view = storage.store.transaction(() =>
-    buildModelGraphView(storage, lease.campaign_id, { currentStepId: lease.step_id ?? null, softBudget: SOFT_GRAPH_BUDGET }),
-  );
-  const observations = storage.graphQuery(lease.campaign_id, { entity: "observations", limit: 20, order: "desc" });
-  const totalObservations = Number(
-    (
-      storage.store.db.prepare("SELECT COUNT(*) AS c FROM observations WHERE campaign_id = ?").get(lease.campaign_id) as {
-        c: number;
-      }
-    ).c,
-  );
-  const hints = storage.listHints(lease.campaign_id);
-  const checkpoint = storage.latestCheckpoint(lease.campaign_id, { runId: lease.run_id, stepId: lease.step_id });
-  const budgetRow = storage.store.db
-    .prepare("SELECT free_calls, free_tokens FROM budget_accounts WHERE campaign_id = ?")
-    .get(lease.campaign_id) as { free_calls: number; free_tokens: number } | undefined;
-
-  // Coverage only burdens models when the task actually carries coverage
-  // obligations: assessment mode, or user-declared mandatory ids.
-  const showCoverage = camp.spec.mode === "assessment" || camp.spec.coverage_policy.mandatory_ids.length > 0;
-  const coverage = showCoverage
-    ? storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 })
-    : null;
+  const snap = storage.store.transaction(() => {
+    const view = buildModelGraphView(storage, lease.campaign_id, {
+      currentStepId: lease.step_id ?? null,
+      softBudget: SOFT_GRAPH_BUDGET,
+    });
+    const observations = storage.graphQuery(lease.campaign_id, { entity: "observations", limit: 20, order: "desc" });
+    const totalObservations = Number(
+      (
+        storage.store.db.prepare("SELECT COUNT(*) AS c FROM observations WHERE campaign_id = ?").get(lease.campaign_id) as {
+          c: number;
+        }
+      ).c,
+    );
+    const showCoverage = camp.spec.mode === "assessment" || camp.spec.coverage_policy.mandatory_ids.length > 0;
+    const coverage = showCoverage ? storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 }) : null;
+    const currentStepRow = lease.step_id
+      ? (storage.store.db.prepare("SELECT * FROM steps WHERE id = ?").get(lease.step_id) as Record<string, unknown> | undefined)
+      : undefined;
+    return {
+      view,
+      observations,
+      totalObservations,
+      hints: storage.listHints(lease.campaign_id),
+      checkpoint: storage.latestCheckpoint(lease.campaign_id, { runId: lease.run_id, stepId: lease.step_id }),
+      budgetRow: storage.store.db
+        .prepare("SELECT free_calls, free_tokens FROM budget_accounts WHERE campaign_id = ?")
+        .get(lease.campaign_id) as { free_calls: number; free_tokens: number } | undefined,
+      coverage,
+      currentStepRow,
+    };
+  });
+  const { view, observations, totalObservations, hints, checkpoint, budgetRow, coverage } = snap;
 
   const omitted = [...view.omitted];
   const obsOmitted = totalObservations - observations.items.length;
@@ -270,9 +280,7 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
     ...extra,
   };
   if (lease.step_id) {
-    const step = storage.store.db.prepare("SELECT * FROM steps WHERE id = ?").get(lease.step_id) as
-      | Record<string, unknown>
-      | undefined;
+    const step = snap.currentStepRow;
     payload.current_step = step ? projectCurrentStep(step) : null;
     if (lease.mode === "execute") {
       payload.skill_pack = buildSkillPack(camp, step);

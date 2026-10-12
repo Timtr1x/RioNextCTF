@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildContextPack } from "../../src/context/builder.ts";
+import { projectGraphItems } from "../../src/context/model-view.ts";
 import { openEngine, type Engine } from "../../src/controller/engine.ts";
 import type { RunLease } from "../../src/domain/types.ts";
 import { loadDemoSpec } from "../../src/eval/helpers.ts";
@@ -372,6 +373,75 @@ test("R05-09: a production-created step's input refs land in the view and manife
       pack.manifest.selected_entity_revisions.some((r) => r.table === "facts" && r.id === "fact_prod"),
       "and its revision enters the internal read set",
     );
+  } finally {
+    e.close();
+  }
+});
+
+// --- R06: the active frontier displays in full while the budget allows ---
+
+test("R06-01: 65 short active steps all appear (no fixed cap)", () => {
+  const e = boot("mv-r06a");
+  try {
+    for (let i = 0; i < 65; i++) insertStep(e, "mv-r06a", `step_a${i}`, "ready", i, `short question ${i}`);
+    const pack = buildContextPack(e.storage, lease("mv-r06a", "decide", null));
+    const payload = pack.user_payload as { graph: { steps: { id: string }[] }; omitted: { kind: string }[] };
+    assert.equal(payload.graph.steps.length, 65, "the whole active frontier shows");
+    assert.equal(payload.omitted.some((o) => o.kind === "steps"), false, "nothing omitted under budget");
+  } finally {
+    e.close();
+  }
+});
+
+test("R06-03: a genuinely over-budget frontier omits honestly and protects the current step", () => {
+  const e = boot("mv-r06b");
+  try {
+    const long = "q".repeat(400);
+    for (let i = 0; i < 400; i++) insertStep(e, "mv-r06b", `step_b${String(i).padStart(3, "0")}`, "ready", i, `${long} ${i}`);
+    const pack = buildContextPack(e.storage, lease("mv-r06b", "execute", "step_b399"));
+    const payload = pack.user_payload as {
+      graph: { steps: { id: string }[] };
+      omitted: { kind: string; total: number; included: number; omitted: number; read_more: { entity: string } }[];
+    };
+    const entry = payload.omitted.find((o) => o.kind === "steps");
+    assert.ok(entry, "over budget omits with an entry");
+    assert.equal(entry.total, 400);
+    assert.equal(entry.included + entry.omitted, 400, "counts add up");
+    assert.ok(entry.omitted > 0);
+    assert.ok(payload.graph.steps.some((s) => s.id === "step_b399"), "the current step survives trimming");
+    assert.ok(JSON.stringify(payload).length <= 400_000);
+  } finally {
+    e.close();
+  }
+});
+
+test("R06-05: the same data builds the same overview twice", () => {
+  const e = boot("mv-r06c");
+  try {
+    for (let i = 0; i < 30; i++) insertStep(e, "mv-r06c", `step_c${i}`, "ready", i, `q${i}`);
+    for (let i = 0; i < 20; i++) insertFact(e, "mv-r06c", `fact_c${i}`, `claim ${i}`, { seq: i });
+    const a = buildContextPack(e.storage, lease("mv-r06c", "decide", null));
+    const b = buildContextPack(e.storage, lease("mv-r06c", "decide", null));
+    const ga = (a.user_payload as { graph: unknown }).graph;
+    const gb = (b.user_payload as { graph: unknown }).graph;
+    assert.equal(JSON.stringify(ga), JSON.stringify(gb));
+  } finally {
+    e.close();
+  }
+});
+
+test("R06-07: ids detail reads return business content without control columns", () => {
+  const e = boot("mv-r06d");
+  try {
+    insertFact(e, "mv-r06d", "fact_d", "detail claim", { seq: 1 });
+    const raw = e.storage.graphQuery("mv-r06d", { entity: "facts", ids: ["fact_d"] });
+    const row = raw.items[0] as Record<string, unknown>;
+    assert.ok("source_run_id" in row || "revision" in row, "raw rows keep metadata for the read set");
+    // the model-facing projection drops them
+    const projected = projectGraphItems("facts", raw.items) as Record<string, unknown>[];
+    assert.equal(projected[0]!.claim, "detail claim");
+    assert.equal("revision" in projected[0]!, false);
+    assert.equal("source_run_id" in projected[0]!, false);
   } finally {
     e.close();
   }

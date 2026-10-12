@@ -2165,7 +2165,7 @@ export class StorageService {
       case "steps":
         rows = this.store.db
           .prepare(
-            `SELECT id, revision, kind, question, status, priority, blocked_reason, last_failure, fingerprint, attempt_count, branch_id, preconditions_json FROM steps WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`,
+            `SELECT id, revision, kind, question, status, priority, blocked_reason, last_failure, next_action, method_family, fingerprint, attempt_count, branch_id, preconditions_json FROM steps WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`,
           )
           .all(campaignId, limit + 1, offset);
         break;
@@ -2176,17 +2176,17 @@ export class StorageService {
         break;
       case "findings":
         rows = this.store.db
-          .prepare(`SELECT id, claim, status, evidence_refs_json, dedup_key FROM findings WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`)
+          .prepare(`SELECT id, revision, claim, status, evidence_refs_json, dedup_key FROM findings WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`)
           .all(campaignId, limit + 1, offset);
         break;
       case "coverage":
         rows = this.store.db
-          .prepare("SELECT id, obligation, applicability, execution_state, outcome, evidence_state, mandatory FROM coverage_items WHERE campaign_id = ? LIMIT ? OFFSET ?")
+          .prepare("SELECT id, revision, obligation, applicability, execution_state, outcome, evidence_state, mandatory FROM coverage_items WHERE campaign_id = ? LIMIT ? OFFSET ?")
           .all(campaignId, limit + 1, offset);
         break;
       case "observations":
         rows = this.store.db
-          .prepare(`SELECT id, subject, body_json, env_rev, observed_at FROM observations WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`)
+          .prepare(`SELECT id, revision, subject, body_json, env_rev, observed_at FROM observations WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`)
           .all(campaignId, limit + 1, offset);
         break;
       default:
