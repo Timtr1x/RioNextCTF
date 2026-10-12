@@ -152,6 +152,8 @@ export interface CoverageResultItem {
   outcome: "no_issue_observed" | "suspected" | "confirmed" | "inconclusive";
   evidence_refs: string[];
   note: string;
+  /** Required iff outcome is confirmed: the already-confirmed Finding. */
+  finding_id?: string;
 }
 
 export interface CoveragePolicy {

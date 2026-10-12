@@ -1387,9 +1387,10 @@ export class StorageService {
       const vr = outcome.verification_result;
       if (vr) this.applyTargetedVerification(campaignId, run, vr);
     }
-    // Coverage moves only through explicit per-obligation results, never by
-    // "this step resolved and the campaign has artifacts".
-    if (outcome.coverage_result && outcome.coverage_result.length > 0) {
+    // Coverage moves only through explicit per-obligation results on a resolved
+    // run, never by "this step resolved and the campaign has artifacts", and a
+    // timed-out/blocked test writes no no_issue_observed.
+    if (outcome.reason === "resolved" && outcome.coverage_result && outcome.coverage_result.length > 0) {
       this.applyCoverageResults(campaignId, run, outcome.coverage_result);
     }
   }
@@ -1398,7 +1399,7 @@ export class StorageService {
   private applyCoverageResults(
     campaignId: string,
     run: Record<string, unknown>,
-    results: { coverage_id: string; outcome: string; evidence_refs: string[]; note: string }[],
+    results: { coverage_id: string; outcome: string; evidence_refs: string[]; note: string; finding_id?: string }[],
   ): void {
     const reject = (coverageId: string, reason: string): void => {
       this.appendEvent(
@@ -1409,10 +1410,15 @@ export class StorageService {
         coverageId,
       );
     };
-    if (this.getCampaign(campaignId).spec.mode !== "assessment") {
+    const spec = this.getCampaign(campaignId).spec;
+    if (spec.mode !== "assessment") {
       for (const r of results) reject(r.coverage_id, "not_assessment");
       return;
     }
+    const env = String(
+      (this.getWorld<{ env_rev?: string }>(campaignId, { env_rev: spec.environment_revision }) as { env_rev?: string }).env_rev ??
+        spec.environment_revision,
+    );
     for (const r of results.slice(0, 8)) {
       const item = this.store.db
         .prepare("SELECT id, obligation FROM coverage_items WHERE id = ? AND campaign_id = ?")
@@ -1431,6 +1437,55 @@ export class StorageService {
         reject(r.coverage_id, "missing_evidence");
         continue;
       }
+      // The obligation must be backed by THIS run's test record: at least one
+      // observation produced here, in the current env. Old-env observations or
+      // other runs' leftovers never mark an item tested/current.
+      let hasOwnTest = false;
+      for (const ref of r.evidence_refs) {
+        const obs = this.store.db.prepare("SELECT source_run_id, env_rev FROM observations WHERE id = ?").get(ref) as
+          | { source_run_id: string | null; env_rev: string }
+          | undefined;
+        if (!obs) continue;
+        if (obs.env_rev !== env) {
+          reject(r.coverage_id, "stale_evidence");
+          hasOwnTest = false;
+          break;
+        }
+        if (obs.source_run_id === String(run.id)) hasOwnTest = true;
+      }
+      if (!hasOwnTest) {
+        reject(r.coverage_id, "not_this_run");
+        continue;
+      }
+      // 'confirmed' borrows a legally verified Finding; it never upgrades one.
+      if (r.outcome === "confirmed") {
+        if (!r.finding_id) {
+          reject(r.coverage_id, "finding_required");
+          continue;
+        }
+        const finding = this.store.db
+          .prepare("SELECT status, evidence_refs_json FROM findings WHERE id = ? AND campaign_id = ?")
+          .get(r.finding_id, campaignId) as { status: string; evidence_refs_json: string } | undefined;
+        if (!finding) {
+          reject(r.coverage_id, "finding_not_in_campaign");
+          continue;
+        }
+        if (finding.status !== "confirmed") {
+          reject(r.coverage_id, "finding_not_confirmed");
+          continue;
+        }
+        let findingRefs: string[] = [];
+        try {
+          const parsed = JSON.parse(finding.evidence_refs_json) as unknown;
+          if (Array.isArray(parsed)) findingRefs = parsed.filter((x): x is string => typeof x === "string");
+        } catch {
+          findingRefs = [];
+        }
+        if (!r.evidence_refs.some((ref) => findingRefs.includes(ref))) {
+          reject(r.coverage_id, "finding_evidence_mismatch");
+          continue;
+        }
+      }
       const outcome = r.outcome as "no_issue_observed" | "suspected" | "confirmed" | "inconclusive";
       this.updateCoverageById(campaignId, item.id, {
         execution_state: "tested",
@@ -1440,7 +1495,15 @@ export class StorageService {
       this.appendEvent(
         campaignId,
         "coverage.result_applied",
-        { run_id: String(run.id), coverage_id: item.id, obligation: item.obligation, outcome, note: r.note.slice(0, 400) },
+        {
+          run_id: String(run.id),
+          coverage_id: item.id,
+          obligation: item.obligation,
+          outcome,
+          note: r.note.slice(0, 400),
+          finding_id: r.finding_id ?? null,
+          evidence_refs: r.evidence_refs,
+        },
         { kind: "controller", id: "coverage" },
         item.id,
       );

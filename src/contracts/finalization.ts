@@ -45,6 +45,7 @@ export function parseCoverageResults(raw: unknown): CoverageResultItem[] | undef
       outcome: p.outcome as CoverageResultItem["outcome"],
       evidence_refs: evidence_refs.slice(0, 32),
       note: typeof p.note === "string" ? p.note.slice(0, 1000) : "",
+      ...(typeof p.finding_id === "string" && p.finding_id ? { finding_id: p.finding_id } : {}),
     });
   }
   return out;
@@ -238,6 +239,7 @@ export function canonicalizeFinishPayload(p: FinishStepInput): string {
             outcome: r.outcome,
             evidence_refs: [...r.evidence_refs].sort(),
             note: r.note,
+            finding_id: r.finding_id ?? null,
           }))
           .sort((a, b) => a.coverage_id.localeCompare(b.coverage_id))
       : null,

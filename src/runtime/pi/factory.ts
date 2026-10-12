@@ -461,6 +461,7 @@ export class PiWorker implements WorkerRuntime {
                   ]),
                   evidence_refs: Type.Array(Type.String()),
                   note: Type.String(),
+                  finding_id: Type.Optional(Type.String({ description: "required iff outcome=confirmed: an already-confirmed finding" })),
                 }),
                 { maxItems: 8 },
               ),

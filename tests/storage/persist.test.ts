@@ -533,9 +533,22 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
   let cov = e2.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk");
   assert.notEqual(cov?.execution_state, "tested", "no auto projection from resolved+artifact");
 
-  // now a finish carrying an explicit result marks exactly that item
+  // now a finish carrying an explicit result marks exactly that item; the
+  // supporting observation is produced by the run that cites it
   e2.storage.store.db.prepare("UPDATE steps SET status = 'ready' WHERE fingerprint = 'f36-fp'").run();
   const claimed2 = e2.storage.claimNextStep(spec.campaign_id, "t", e2.storage.getCampaign(spec.campaign_id).epoch)!;
+  const obs2 = e2.storage.recordObservation({
+    campaign_id: spec.campaign_id,
+    producer_id: "t",
+    submission_id: "o2",
+    run_id: claimed2.run_id,
+    attempt_id: claimed2.run_id,
+    subject: "desk",
+    body: { ok: true, tested: true },
+    artifact_refs: [art.id],
+    conditions: {},
+    env_rev: "env-1",
+  });
   const withResult = e2.storage.submitRunOutcome({
     campaign_id: spec.campaign_id,
     run_id: claimed2.run_id,
@@ -544,12 +557,12 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
     payload: {
       disposition: "resolved",
       summary: "tested the desk",
-      evidence_refs: [obs.canonical_ids.observation_id!],
+      evidence_refs: [obs2.canonical_ids.observation_id!],
       coverage_result: [
-        { coverage_id: covId, outcome: "no_issue_observed", evidence_refs: [obs.canonical_ids.observation_id!], note: "looked, nothing there" },
+        { coverage_id: covId, outcome: "no_issue_observed", evidence_refs: [obs2.canonical_ids.observation_id!], note: "looked, nothing there" },
       ],
     },
-    observation_ids: [obs.canonical_ids.observation_id!],
+    observation_ids: [obs2.canonical_ids.observation_id!],
     fact_ids: [],
     finding_ids: [],
     source: "primary",
