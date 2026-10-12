@@ -834,6 +834,8 @@ export class StorageService {
     env_rev?: string;
     identity_ref?: string;
     source_grade?: FactSourceGrade;
+    /** Internal: Decide-applied hypotheses pass false; their batch is the review. */
+    request_review?: boolean;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, (): IdempotentResult => {
       this.assertRun(args.campaign_id, args.run_id);
@@ -904,7 +906,7 @@ export class StorageService {
           args.identity_ref ?? null,
         );
       if (grade !== "derived") this.bumpProgress(args.campaign_id);
-      this.markRequested(args.campaign_id, seq);
+      if (args.request_review !== false) this.markRequested(args.campaign_id, seq);
       this.recomputeStepReadiness(args.campaign_id);
       return {
         status: "ok",
@@ -923,6 +925,8 @@ export class StorageService {
     claim: string;
     evidence_refs: string[];
     dedup_key: string;
+    /** Internal: Decide-applied writes pass false. */
+    request_review?: boolean;
     impact?: string;
     conditions?: Record<string, unknown>;
     model_confidence?: number;
@@ -980,7 +984,7 @@ export class StorageService {
           args.impact ?? null,
           args.model_confidence != null ? String(args.model_confidence) : null,
         );
-      this.markRequested(args.campaign_id, seq);
+      if (args.request_review !== false) this.markRequested(args.campaign_id, seq);
       return { status: "ok", canonical_ids: { finding_id: id }, seq, extra: { status: "suspected" } };
     });
   }
@@ -1042,6 +1046,8 @@ export class StorageService {
     branch_id?: string;
     input_refs?: { id: string; revision: number }[];
     priority?: number;
+    /** Internal: Decide-applied plan steps pass false; the batch is the review. */
+    request_review?: boolean;
     retry_reason?: string;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, (): IdempotentResult => {
@@ -1122,7 +1128,7 @@ export class StorageService {
       } else if (status === "blocked") {
         this.appendEvent(args.campaign_id, "step.blocked", { step_id: id, reason: blocked }, { kind: "controller", id: "scheduler" }, id);
       }
-      this.markRequested(args.campaign_id, seq);
+      if (args.request_review !== false) this.markRequested(args.campaign_id, seq);
       return { status: "ok", canonical_ids: { step_id: id, branch_id: branch }, seq, extra: { step_status: status } };
     });
   }
@@ -2427,6 +2433,7 @@ export class StorageService {
           reopen_rule: step.reopenRule ?? { kind: "never" },
           branch_id: step.branchId,
           input_refs: step.inputRefs,
+          request_review: false,
         });
         Object.assign(ids, result.canonical_ids);
         return result.seq;
@@ -2493,6 +2500,7 @@ export class StorageService {
           support_refs: op.support_refs,
           conditions: op.conditions,
           source_grade: "derived",
+          request_review: false,
         }).seq;
       }
       case "request_verification": {
@@ -2525,6 +2533,7 @@ export class StorageService {
           fingerprint: createHash("sha256").update(`verify|${op.finding_or_fact_id}|${op.method}`).digest("hex").slice(0, 32),
           reopen_rule: { kind: "never" },
           priority: 10,
+          request_review: false,
           input_refs: [{ id: op.finding_or_fact_id, revision }],
         });
         Object.assign(ids, result.canonical_ids);

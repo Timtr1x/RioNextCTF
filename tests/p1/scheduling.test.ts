@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeRuntimeConfig } from "../../src/contracts/config.ts";
+import { buildContextPack } from "../../src/context/builder.ts";
 import { Engine } from "../../src/controller/engine.ts";
 import { loadDemoSpec } from "../../src/eval/helpers.ts";
 import type { TurnChooser } from "../../src/runtime/pi/scripted-stream.ts";
@@ -112,5 +113,84 @@ test("S09: a hint arriving mid-Decide stays unreviewed after the commit", async 
   );
   // and the loop notices the unreviewed hint and decides again
   assert.ok(decideCalls >= 2, `expected a second Decide for the mid-run hint, got ${decideCalls}`);
+  e.close();
+});
+
+// --- R07: a Decide batch must not re-request review of its own writes ---
+
+test("R07-01: a plan-creating Decide leaves requested_seq <= reviewed_seq", () => {
+  const dir = tmp();
+  const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
+  const spec = loadDemoSpec("sched-r07");
+  e.createCampaign(spec);
+  e.storage.setCampaignState("sched-r07", "active", { kind: "user", id: "t" });
+  const run = e.storage.claimDecide("sched-r07", "t")!;
+  const pack = buildContextPack(e.storage, {
+    run_id: run.run_id,
+    campaign_id: "sched-r07",
+    step_id: null,
+    mode: "decide",
+    kind: "decide",
+    attempt_no: 1,
+    fence: run.fence,
+    cancel_epoch: 0,
+    deadline_ms: Date.now() + 60_000,
+    lease_owner: "t",
+    continuation_of: null,
+  });
+  const H = pack.manifest.graph_snapshot_seq;
+  e.storage.applyProposalBatch({
+    campaign_id: "sched-r07",
+    producer_id: run.run_id,
+    submission_id: "r07-batch",
+    run_id: run.run_id,
+    operations: [{ op: "propose_step", question: "a new direction", kind: "explore", methodFamily: "generic" }],
+    reviewed_through_seq: H,
+  });
+  const camp = e.storage.getCampaign("sched-r07");
+  assert.ok(
+    camp.requested_seq <= camp.reviewed_seq,
+    `self-trigger: requested=${camp.requested_seq} reviewed=${camp.reviewed_seq}`,
+  );
+  assert.ok(camp.reviewed_seq <= H, "reviewed never advances past the read watermark");
+  e.close();
+});
+
+test("R07-03: a mid-run hint stays unreviewed; the plan's own writes don't swallow it", () => {
+  const dir = tmp();
+  const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
+  const spec = loadDemoSpec("sched-r07b");
+  e.createCampaign(spec);
+  e.storage.setCampaignState("sched-r07b", "active", { kind: "user", id: "t" });
+  const run = e.storage.claimDecide("sched-r07b", "t")!;
+  const pack = buildContextPack(e.storage, {
+    run_id: run.run_id,
+    campaign_id: "sched-r07b",
+    step_id: null,
+    mode: "decide",
+    kind: "decide",
+    attempt_no: 1,
+    fence: run.fence,
+    cancel_epoch: 0,
+    deadline_ms: Date.now() + 60_000,
+    lease_owner: "t",
+    continuation_of: null,
+  });
+  const H = pack.manifest.graph_snapshot_seq;
+  // external input arrives after the pack was built
+  e.hint("sched-r07b", "new intel mid-run");
+  const hintSeq = e.storage.getCampaign("sched-r07b").requested_seq;
+  e.storage.applyProposalBatch({
+    campaign_id: "sched-r07b",
+    producer_id: run.run_id,
+    submission_id: "r07b-batch",
+    run_id: run.run_id,
+    operations: [{ op: "propose_step", question: "planned with what I saw", kind: "explore", methodFamily: "generic" }],
+    reviewed_through_seq: H,
+  });
+  const camp = e.storage.getCampaign("sched-r07b");
+  assert.equal(camp.requested_seq, hintSeq, "the plan's own events must not bump requested_seq");
+  assert.ok(camp.reviewed_seq < hintSeq, "the hint is still unreviewed");
+  assert.ok(camp.reviewed_seq <= H);
   e.close();
 });
