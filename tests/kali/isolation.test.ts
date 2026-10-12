@@ -550,7 +550,7 @@ test("K08 unknown-effect lock survives finishRun and is released only after canc
   });
   assert.equal(sent.status, "in_flight");
   const held = e.storage.listResourceLocks("t-k08");
-  assert.ok(held.some((l) => l.lock_key === "workspace:t-k08"));
+  assert.ok(held.some((l) => l.lock_key === `workspace:t-k08:${lease.run_id}`));
   assert.ok(held.some((l) => l.lock_key === "target:lab.internal"));
   assert.ok(held.every((l) => l.effect_known === 0));
   e.storage.finishRun("t-k08", lease.run_id, {

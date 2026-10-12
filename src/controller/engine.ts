@@ -193,7 +193,7 @@ export class Engine {
     return epoch;
   }
 
-  kaliOpts(campaignId: string): KaliStartOpts {
+  kaliOpts(campaignId: string, runId?: string): KaliStartOpts {
     const camp = this.storage.getCampaign(campaignId);
     const allow = camp.spec.scope.assets;
     // Admission follows what the task actually carries (attachments, configured
@@ -211,6 +211,7 @@ export class Engine {
       resolve: this.options.kaliResolve,
       capabilities: resolveToolCapabilities(camp.spec).capabilities,
     };
+    if (runId) opts.runId = runId;
     if (this.options.kaliShared) {
       // Contest mode: exec into the shared container; this campaign's
       // container-side root is /workspace/<campaignId>. Host paths unchanged.
@@ -225,7 +226,7 @@ export class Engine {
 
   private kaliOptsForInvocation(invocationId: string): KaliStartOpts {
     const inv = this.invocations.get(invocationId);
-    return this.kaliOpts(String(inv.campaign_id));
+    return this.kaliOpts(String(inv.campaign_id), String(inv.run_id ?? "") || undefined);
   }
 
   pause(campaignId: string): void {
@@ -360,10 +361,27 @@ export class Engine {
     }
   }
 
+  /**
+   * Fragment-boundary scheduling: Decide runs only at boundaries with no
+   * execute fragment in flight, then up to N execute fragments run in parallel
+   * (N from the campaign's execution_policy, capped by the host config). New
+   * input stops refills; running fragments finish to their own boundary; the
+   * next cycle re-plans. Default N=1 reproduces the old serial loop.
+   */
   async runLoop(campaignId: string): Promise<void> {
     const maxCycles = this.options.maxCycles ?? 1000;
     let decideAttemptedFor = -1;
     let lastDecideResolved = false;
+    const active = new Map<string, Promise<unknown>>();
+    const trackRun = (lease: RunLease): void => {
+      const p = this.runWorker(lease)
+        .catch((err: unknown) => {
+          this.log(`run ${lease.run_id} failed: ${err instanceof Error ? err.message : String(err)}`);
+        })
+        .finally(() => active.delete(lease.run_id));
+      active.set(lease.run_id, p);
+    };
+
     for (let i = 0; i < maxCycles; i++) {
       const camp = this.storage.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused" || camp.state === "awaiting_verify") break;
@@ -396,8 +414,10 @@ export class Engine {
         emptyFrontier &&
         camp.empty_reviews < camp.spec.stop_policy.max_empty_reviews_per_progress_epoch;
       let ranDecide = false;
+      // First version: no Decide while any Execute fragment runs (no plan races).
       if (
         needDecide &&
+        active.size === 0 &&
         !decideLock.decide_lock_owner &&
         camp.state !== "budget_paused" &&
         (camp.requested_seq > decideAttemptedFor || canRetryEmptyReview)
@@ -417,12 +437,46 @@ export class Engine {
       }
       const afterDecide = this.storage.getCampaign(campaignId);
       if (afterDecide.state === "cancelled") break;
-      let ranExecute = false;
-      if (this.budget.canAdmit(campaignId, 1, this.modelReserveTokens, 0)) {
-        ranExecute = Boolean(await this.runExecuteSlot(campaignId));
+
+      // Refill free execute slots — but new semantic input pauses refills so the
+      // running fragments settle and the next boundary re-plans first.
+      const cap = Math.min(
+        Math.max(1, Math.min(8, camp.spec.execution_policy?.max_execute_workers ?? 1)),
+        this.config.max_concurrent_execute,
+      );
+      while (active.size < cap && this.budget.canAdmit(campaignId, 1, this.modelReserveTokens, 0)) {
+        const fresh = this.storage.getCampaign(campaignId);
+        if (fresh.requested_seq > fresh.reviewed_seq && i > 0) break;
+        if (fresh.state !== "active" && fresh.state !== "created") break;
+        const claimed = this.storage.claimNextStep(campaignId, this.config.instance_id, fresh.epoch, this.config.run_lease_ms);
+        if (!claimed) break;
+        const lease: RunLease = {
+          run_id: claimed.run_id,
+          campaign_id: campaignId,
+          step_id: claimed.step_id,
+          mode: "execute",
+          kind: claimed.kind,
+          attempt_no: claimed.attempt_no,
+          fence: claimed.fence,
+          cancel_epoch: fresh.cancel_epoch,
+          deadline_ms: this.leaseDeadline(fresh),
+          lease_owner: this.config.instance_id,
+          continuation_of: null,
+        };
+        trackRun(lease);
       }
+
       this.storage.consumeReviewedEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
+
+      if (active.size > 0) {
+        // Wait for the first fragment to settle (or the poll tick) — never a
+        // batch barrier on the slowest run.
+        const wait = this.options.pollWaitMs ?? 2_000;
+        await Promise.race([...active.values(), new Promise((r) => setTimeout(r, Math.max(50, wait)))]);
+        continue;
+      }
+
       const snap = this.snapshot(campaignId);
       const decision = evaluateCompletion(snap);
       if (decision.suggestedState === "waiting" && polled.still_running > 0 && i < maxCycles - 1) {
@@ -474,7 +528,7 @@ export class Engine {
         this.writeReport(campaignId, "budget_paused");
         break;
       }
-      if (!ranDecide && !ranExecute && polled.still_running === 0 && snap.ready_steps === 0) {
+      if (!ranDecide && polled.still_running === 0 && snap.ready_steps === 0) {
         // A provider outage can park every step at once. Give the transiently
         // parked ones one more chance before idling; attempt_count caps this,
         // so a genuinely dead step cannot spin the loop.
@@ -689,9 +743,10 @@ export class Engine {
     const camp = this.storage.getCampaign(campaignId);
     const counts = this.storage.counts(campaignId);
     const budget = this.budget.snapshot(campaignId);
-    const activeRun = this.storage.store.db
-      .prepare("SELECT id, mode, state FROM task_runs WHERE campaign_id = ? AND state IN ('claimed','running') LIMIT 1")
-      .get(campaignId);
+    const activeRuns = this.storage.store.db
+      .prepare("SELECT id, mode, state, step_id FROM task_runs WHERE campaign_id = ? AND state IN ('claimed','running') ORDER BY created_at")
+      .all(campaignId) as { id: string; mode: string; state: string; step_id: string | null }[];
+    const activeRun = activeRuns[0] ?? null;
     const openInv = this.invocations.nonTerminal(campaignId);
     const uncertain = openInv.map((row) => ({
       id: String(row.id),
@@ -714,6 +769,7 @@ export class Engine {
       campaign_id: campaignId,
       state: camp.state,
       active_run: activeRun ?? null,
+      active_runs: activeRuns,
       candidates_ready: counts.ready,
       blocked: counts.blocked,
       budget,

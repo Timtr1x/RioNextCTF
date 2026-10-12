@@ -863,13 +863,13 @@ export class PiWorker implements WorkerRuntime {
           return ok({ observation: result.observation, subject: result.subject, transient: result.transient ?? false });
         }),
         tool("kali_run", KALI_RUN_DESCRIPTION, KALI_RUN_PARAMETERS, async (_id, _params) => {
-          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_kali_result"));
+          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.run_id), "no_kali_result"));
         }),
         tool("kali_write", KALI_WRITE_DESCRIPTION, KALI_WRITE_PARAMETERS, async (_id, _params) => {
-          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_kali_write_result"));
+          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.run_id), "no_kali_write_result"));
         }),
         tool("playwright", PLAYWRIGHT_DESCRIPTION, PLAYWRIGHT_PARAMETERS, async (_id, _params) => {
-          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_playwright_result"));
+          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.run_id), "no_playwright_result"));
         }),
         this.finishStepTool(lease, "primary"),
       );

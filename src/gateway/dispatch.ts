@@ -7,10 +7,12 @@ import type { BudgetLedger } from "./budget-ledger.ts";
 import type { InvocationBook } from "./invocation.ts";
 import type { StorageService } from "../storage/service.ts";
 
-export function envLockKeys(campaignId: string, payload: unknown): string[] {
+export function envLockKeys(campaignId: string, payload: unknown, runId?: string): string[] {
   const keys = new Set<string>();
   if (isKaliPayload(payload)) {
-    keys.add(`workspace:${campaignId}`);
+    // Run-private workspace: no campaign-wide serialization (C4). The shared
+    // input/ tree is read-only; results hand off through artifacts.
+    keys.add(`workspace:${campaignId}:${runId ?? "legacy"}`);
     const url = (payload as { url?: string }).url;
     if (typeof url === "string" && url) {
       try {
@@ -114,7 +116,7 @@ export class DispatchGate {
         reserved_calls: 1,
       });
       if (req.envTool) {
-        for (const key of envLockKeys(req.lease.campaign_id, req.payload)) {
+        for (const key of envLockKeys(req.lease.campaign_id, req.payload, req.lease.run_id)) {
           if (!this.storage.acquireResourceLock(req.lease.campaign_id, key, inv.id, false)) {
             throw new DomainError("resource_locked", `resource lock held: ${key}`, "denied");
           }

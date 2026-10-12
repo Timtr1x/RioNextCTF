@@ -44,6 +44,8 @@ export interface KaliStartOpts {
   resolve?: ResolveFn;
   /** Resolved tool capabilities drive the binary allowlist; absent means legacy web. */
   capabilities?: ToolCapability[];
+  /** Per-run private working directory under the campaign root (C4). */
+  runId?: string;
   shared?: KaliSharedSpec;
   /** Container resource overrides; defaults come from DEFAULT_KALI_LIMITS. */
   limits?: { memory?: string; cpus?: string };
@@ -412,7 +414,8 @@ export class KaliRuntime {
       return this.execBackgroundAsync(opts, spec.name, bin, args, executionId, extra?.timeout_ms, extra?.signal);
     }
     const capSec = Math.ceil((extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) / 1000);
-    const argv = ["exec", "-w", containerRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
+    runDirHost(opts);
+    const argv = ["exec", "-w", runRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
     const result = await this.docker.runAsync(argv, {
       timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
@@ -421,11 +424,10 @@ export class KaliRuntime {
     const truncated =
       result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
-    // Never kill a shared container on timeout: the `timeout` wrapper already
-    // reaped the process, and killing the box would nuke sibling campaigns.
-    if (result.timedOut && !opts.shared) this.kill(opts.campaignId);
+    // The in-container `timeout` wrapper already reaped this invocation's
+    // process. Never kill the container here: sibling runs share it (C4).
     const out = { ...result, truncated, container: spec.name };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -473,7 +475,8 @@ export class KaliRuntime {
       "",
     ].join("\n");
     writeFileSync(files.sh, script, { encoding: "utf8" });
-    const started = await this.docker.runAsync(["exec", "-d", "-w", containerRootOf(opts), container, "sh", files.containerSh], {
+    runDirHost(opts);
+    const started = await this.docker.runAsync(["exec", "-d", "-w", runRootOf(opts), container, "sh", files.containerSh], {
       timeoutMs: 15_000,
       signal,
     });
@@ -489,7 +492,7 @@ export class KaliRuntime {
       container,
       pending: true as const,
     };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -508,7 +511,7 @@ export class KaliRuntime {
     }
     const spec = await this.ensureAsync(opts, signal);
     const result = await this.docker.runAsync(["exec", "-i", spec.name, "node", "/opt/rionext/pw-ctl.mjs"], {
-      input: JSON.stringify(cmd),
+      input: JSON.stringify(opts.runId ? { ...cmd, session_id: opts.runId } : cmd),
       timeoutMs: Math.max(DEFAULT_KALI_LIMITS.maxRuntimeMs, cmd.timeout_ms ?? 0) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
       signal,
@@ -517,7 +520,7 @@ export class KaliRuntime {
       result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     const out = { ...result, truncated, container: spec.name };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -536,7 +539,8 @@ export class KaliRuntime {
     if (used + content.length > DEFAULT_KALI_LIMITS.maxWorkspaceBytes) {
       throw new DomainError("disk_cap", "workspace disk occupancy exceeds limit", "denied");
     }
-    const dest = join(opts.workspaceHost, rel);
+    const baseDir = runDirHost(opts) ?? opts.workspaceHost;
+    const dest = join(baseDir, rel);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, content, "utf8");
     const spec = await this.ensureAsync(opts, signal);
@@ -549,7 +553,7 @@ export class KaliRuntime {
       truncated: false,
       container: spec.name,
     };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -567,7 +571,8 @@ export class KaliRuntime {
       return this.execBackground(opts, spec.name, bin, args, executionId, extra?.timeout_ms);
     }
     const capSec = Math.ceil((extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) / 1000);
-    const argv = ["exec", "-w", containerRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
+    runDirHost(opts);
+    const argv = ["exec", "-w", runRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
     const result = this.docker.run(argv, {
       timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
@@ -575,11 +580,10 @@ export class KaliRuntime {
     const truncated =
       result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
-    // Never kill a shared container on timeout: the `timeout` wrapper already
-    // reaped the process, and killing the box would nuke sibling campaigns.
-    if (result.timedOut && !opts.shared) this.kill(opts.campaignId);
+    // The in-container `timeout` wrapper already reaped this invocation's
+    // process. Never kill the container here: sibling runs share it (C4).
     const out = { ...result, truncated, container: spec.name };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -603,7 +607,7 @@ export class KaliRuntime {
       container: opts.shared?.name ?? containerName(opts.campaignId),
       pending: false,
     };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -638,7 +642,8 @@ export class KaliRuntime {
       "",
     ].join("\n");
     writeFileSync(files.sh, script, { encoding: "utf8" });
-    const started = this.docker.run(["exec", "-d", "-w", containerRootOf(opts), container, "sh", files.containerSh], {
+    runDirHost(opts);
+    const started = this.docker.run(["exec", "-d", "-w", runRootOf(opts), container, "sh", files.containerSh], {
       timeoutMs: 15_000,
     });
     if (started.code !== 0) {
@@ -653,7 +658,7 @@ export class KaliRuntime {
       container,
       pending: true as const,
     };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -671,7 +676,8 @@ export class KaliRuntime {
     if (used + content.length > DEFAULT_KALI_LIMITS.maxWorkspaceBytes) {
       throw new DomainError("disk_cap", "workspace disk occupancy exceeds limit", "denied");
     }
-    const dest = join(opts.workspaceHost, rel);
+    const baseDir = runDirHost(opts) ?? opts.workspaceHost;
+    const dest = join(baseDir, rel);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, content, "utf8");
     const spec = this.ensure(opts);
@@ -684,7 +690,7 @@ export class KaliRuntime {
       truncated: false,
       container: spec.name,
     };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -702,7 +708,7 @@ export class KaliRuntime {
     }
     const spec = this.ensure(opts);
     const result = this.docker.run(["exec", "-i", spec.name, "node", "/opt/rionext/pw-ctl.mjs"], {
-      input: JSON.stringify(cmd),
+      input: JSON.stringify(opts.runId ? { ...cmd, session_id: opts.runId } : cmd),
       timeoutMs: Math.max(DEFAULT_KALI_LIMITS.maxRuntimeMs, cmd.timeout_ms ?? 0) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
     });
@@ -710,7 +716,7 @@ export class KaliRuntime {
       result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     const out = { ...result, truncated, container: spec.name };
-    this.last.set(opts.campaignId, out);
+    this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
 
@@ -801,6 +807,20 @@ function shQuote(s: string): string {
 
 function containerRootOf(opts: KaliStartOpts): string {
   return opts.shared?.containerRoot ?? "/workspace";
+}
+
+/** Container-side cwd: the campaign root, or the run's private dir under it. */
+function runRootOf(opts: KaliStartOpts): string {
+  const base = containerRootOf(opts);
+  return opts.runId ? `${base}/runs/${opts.runId}` : base;
+}
+
+/** Host-side run dir; created on demand so the container -w target exists. */
+function runDirHost(opts: KaliStartOpts): string | null {
+  if (!opts.runId) return null;
+  const dir = join(opts.workspaceHost, "runs", opts.runId);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function opFiles(workspaceHost: string, executionId: string, containerRoot = "/workspace"): {

@@ -26,7 +26,7 @@ import {
  */
 const GOLDEN = {
   execute_prompt_sha256: "109055c98fc24154d1c1d75870ee7843dcff73255afaeb64015ac7628897ec4f",
-  web_execute_composed_sha256: "dc688aeb7f66b265dda6a1587e2d11d82f13a851b3c427b02a5966188b13f0c6",
+  web_execute_composed_sha256: "6ca5b0b0517bbdcb325a990e4d7f60f4ba5cef74e26b55c32e4b84f5658ced2d",
   kali_tool_schema_sha256: "980846d077eb8408c42fc52387f0bf6a49441b21e7f668a46bdb7f62fb0ac074",
   web_binaries_sha256: "ba521f7738b958b8893ecbe80c2d205b4bba36604d568353bba709391ec1694b",
   web_tool_allowlist_sha256: "adf8cd7680b0c82cf96e7b61c4a10f060bd3e4848c0d016bea911d8a9f7ca25c",

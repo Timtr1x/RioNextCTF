@@ -4,29 +4,32 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { chromium } from "playwright";
 
 const PORT = 18765;
-const SCREENSHOT = "/workspace/pw-last.png";
 
 let browser;
-let context;
-let page;
-/** @type {Map<string, string>} */
-const refs = new Map();
+/** Per-run browser state: context + page + ref map + screenshot path. */
+const sessions = new Map();
 
-async function ensurePage() {
+async function ensurePage(sessionId) {
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-extensions"],
     });
-    context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 720 } });
-    page = await context.newPage();
   }
-  if (!page || page.isClosed()) page = await context.newPage();
-  return page;
+  let s = sessions.get(sessionId);
+  if (!s) {
+    const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 720 } });
+    const page = await context.newPage();
+    s = { context, page, refs: new Map() };
+    sessions.set(sessionId, s);
+  }
+  if (!s.page || s.page.isClosed()) s.page = await s.context.newPage();
+  return s;
 }
 
-async function snapshot(p) {
-  refs.clear();
+async function snapshot(s) {
+  const p = s.page;
+  s.refs.clear();
   const items = await p.evaluate(() => {
     const sel = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"]';
     const nodes = [...document.querySelectorAll(sel)].slice(0, 80);
@@ -56,7 +59,7 @@ async function snapshot(p) {
       css: pathOf(el),
     }));
   });
-  for (const it of items) refs.set(it.ref, it.css);
+  for (const it of items) s.refs.set(it.ref, it.css);
   return {
     url: p.url(),
     title: await p.title(),
@@ -64,54 +67,66 @@ async function snapshot(p) {
   };
 }
 
-function resolveLocator(p, cmd) {
-  if (cmd.selector) return p.locator(String(cmd.selector)).first();
-  const css = refs.get(String(cmd.ref ?? ""));
+function resolveLocator(s, cmd) {
+  if (cmd.selector) return s.page.locator(String(cmd.selector)).first();
+  const css = s.refs.get(String(cmd.ref ?? ""));
   if (!css) throw new Error(`unknown ref ${cmd.ref}; call snapshot first`);
-  return p.locator(css).first();
+  return s.page.locator(css).first();
 }
 
 async function handle(cmd) {
   const op = String(cmd.op ?? "");
+  // the controller injects the run id; "default" keeps pre-C4 behavior
+  const sessionId = String(cmd.session_id ?? "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
   const timeout = Number(cmd.timeout_ms ?? 15_000);
   if (op === "status") {
-    return { browser: Boolean(browser), url: page && !page.isClosed() ? page.url() : null, refs: refs.size };
+    const s = sessions.get(sessionId);
+    return { browser: Boolean(browser), session: sessionId, url: s && !s.page.isClosed() ? s.page.url() : null, refs: s ? s.refs.size : 0 };
   }
-  const p = await ensurePage();
+  const s = await ensurePage(sessionId);
+  const p = s.page;
   switch (op) {
     case "goto": {
       const url = String(cmd.url ?? "");
       if (!url) throw new Error("url required");
       const resp = await p.goto(url, { waitUntil: "domcontentloaded", timeout });
-      const snap = await snapshot(p);
+      const snap = await snapshot(s);
       return { status: resp?.status() ?? null, finalUrl: p.url(), ...snap };
     }
     case "snapshot":
-      return snapshot(p);
+      return snapshot(s);
     case "click":
-      await resolveLocator(p, cmd).click({ timeout });
-      return snapshot(p);
+      await resolveLocator(s, cmd).click({ timeout });
+      return snapshot(s);
     case "type":
-      await resolveLocator(p, cmd).fill(String(cmd.text ?? ""), { timeout });
+      await resolveLocator(s, cmd).fill(String(cmd.text ?? ""), { timeout });
       return { typed: true, url: p.url() };
     case "press":
       await p.keyboard.press(String(cmd.key ?? "Enter"));
-      return snapshot(p);
+      return snapshot(s);
     case "wait":
       await p.waitForTimeout(Math.min(timeout, 10_000));
-      return snapshot(p);
+      return snapshot(s);
     case "back":
       await p.goBack({ timeout });
-      return snapshot(p);
+      return snapshot(s);
     case "content": {
       const text = await p.locator("body").innerText().catch(() => "");
       return { url: p.url(), title: await p.title(), text: text.slice(0, 8000) };
     }
     case "screenshot": {
-      mkdirSync("/workspace", { recursive: true });
+      const dir = `/workspace/runs/${sessionId}`;
+      mkdirSync(dir, { recursive: true });
+      const path = `${dir}/pw-last.png`;
       const buf = await p.screenshot({ fullPage: false });
-      writeFileSync(SCREENSHOT, buf);
-      return { path: SCREENSHOT, bytes: buf.length, url: p.url() };
+      writeFileSync(path, buf);
+      return { path, bytes: buf.length, url: p.url() };
+    }
+    case "close": {
+      const sess = sessions.get(sessionId);
+      sessions.delete(sessionId);
+      if (sess) await sess.context.close().catch(() => {});
+      return { closed: true, session: sessionId };
     }
     default:
       throw new Error(`unknown playwright op ${op}`);
@@ -130,7 +145,7 @@ function readBody(req) {
 const server = createServer(async (req, res) => {
   if (req.method === "GET") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, service: "rionext-playwright" }));
+    res.end(JSON.stringify({ ok: true, service: "rionext-playwright", sessions: sessions.size }));
     return;
   }
   try {
