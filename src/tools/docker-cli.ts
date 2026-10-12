@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { isProtectedImageRef, KALI_KEEPER_NAME } from "./kali-profile.ts";
 
 export interface DockerExecResult {
@@ -12,11 +12,25 @@ export interface DockerRunOpts {
   timeoutMs?: number;
   maxBytes?: number;
   input?: string;
+  /** Abort the process group (worker cancellation). */
+  signal?: AbortSignal;
 }
 
 export interface DockerCli {
   available(): boolean;
   run(argv: string[], opts?: DockerRunOpts): DockerExecResult;
+  /** Async variant for worker paths: the event loop stays free while the tool runs. */
+  runAsync(argv: string[], opts?: DockerRunOpts): Promise<DockerExecResult>;
+}
+
+function guardArgv(argv: string[]): DockerExecResult | null {
+  if (argv[0] === "rmi" && argv.some((a) => isProtectedImageRef(a))) {
+    return { stdout: "", stderr: "refusing to rmi master image rionext-kali", code: 1, timedOut: false };
+  }
+  if ((argv[0] === "rm" || argv[0] === "kill") && argv.includes(KALI_KEEPER_NAME)) {
+    return { stdout: "", stderr: "refusing to remove master keeper rionext-master-keep", code: 1, timedOut: false };
+  }
+  return null;
 }
 
 export class ProcessDockerCli implements DockerCli {
@@ -26,12 +40,8 @@ export class ProcessDockerCli implements DockerCli {
   }
 
   run(argv: string[], opts?: DockerRunOpts): DockerExecResult {
-    if (argv[0] === "rmi" && argv.some((a) => isProtectedImageRef(a))) {
-      return { stdout: "", stderr: "refusing to rmi master image rionext-kali", code: 1, timedOut: false };
-    }
-    if ((argv[0] === "rm" || argv[0] === "kill") && argv.includes(KALI_KEEPER_NAME)) {
-      return { stdout: "", stderr: "refusing to remove master keeper rionext-master-keep", code: 1, timedOut: false };
-    }
+    const denied = guardArgv(argv);
+    if (denied) return denied;
     const maxBytes = opts?.maxBytes ?? 1_000_000;
     const r = spawnSync("docker", argv, {
       encoding: "utf8",
@@ -45,10 +55,76 @@ export class ProcessDockerCli implements DockerCli {
     const stderr = String(r.stderr ?? "").slice(0, maxBytes);
     return { stdout, stderr, code: r.status ?? (timedOut ? 124 : 1), timedOut };
   }
+
+  runAsync(argv: string[], opts?: DockerRunOpts): Promise<DockerExecResult> {
+    const denied = guardArgv(argv);
+    if (denied) return Promise.resolve(denied);
+    const maxBytes = opts?.maxBytes ?? 1_000_000;
+    const timeoutMs = opts?.timeoutMs ?? 60_000;
+    return new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn("docker", argv, { windowsHide: true });
+      } catch {
+        resolve({ stdout: "", stderr: "spawn failed", code: 1, timedOut: false });
+        return;
+      }
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+      let settled = false;
+      const finish = (code: number | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        opts?.signal?.removeEventListener("abort", onAbort);
+        resolve({
+          stdout: stdout.slice(0, maxBytes),
+          stderr: stderr.slice(0, maxBytes),
+          code: code ?? (timedOut ? 124 : 1),
+          timedOut,
+        });
+      };
+      const onAbort = (): void => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        onAbort();
+      }, timeoutMs);
+      timer.unref();
+      child.stdout.on("data", (d) => {
+        stdout += String(d);
+        if (stdout.length > maxBytes) stdout = stdout.slice(0, maxBytes);
+      });
+      child.stderr.on("data", (d) => {
+        stderr += String(d);
+        if (stderr.length > maxBytes) stderr = stderr.slice(0, maxBytes);
+      });
+      child.on("error", () => finish(null));
+      child.on("close", (code) => finish(code));
+      if (opts?.signal) {
+        if (opts.signal.aborted) onAbort();
+        else opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      try {
+        if (opts?.input !== undefined) child.stdin.write(opts.input);
+        child.stdin.end();
+      } catch {
+        // stdin closed early; the close event settles
+      }
+    });
+  }
 }
 
 export class FakeDockerCli implements DockerCli {
   readonly calls: string[][] = [];
+  /** Test hook: hold async calls until released, to prove real overlap. */
+  gate: Promise<void> | null = null;
   lastInput: string | undefined;
   next: DockerExecResult = { stdout: "", stderr: "", code: 0, timedOut: false };
   alive = new Set<string>();
@@ -120,6 +196,11 @@ export class FakeDockerCli implements DockerCli {
       code: this.next.code,
       timedOut: this.next.timedOut,
     };
+  }
+
+  async runAsync(argv: string[], opts?: DockerRunOpts): Promise<DockerExecResult> {
+    if (this.gate) await this.gate;
+    return this.run(argv, opts);
   }
 }
 

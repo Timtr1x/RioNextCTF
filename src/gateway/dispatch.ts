@@ -32,6 +32,8 @@ export interface DispatchRequest {
   payload: unknown;
   effect: EffectClass;
   envTool: boolean;
+  /** Worker cancellation: killing this signal kills only this invocation's process. */
+  signal?: AbortSignal;
 }
 
 export interface DispatchResult {
@@ -42,10 +44,6 @@ export interface DispatchResult {
   pending?: boolean;
 }
 
-/**
- * Linearization point: dispatching is written in the same transaction that
- * grants the send permit. Adapter send happens after that commit.
- */
 export class DispatchGate {
   constructor(
     private readonly storage: StorageService,
@@ -55,7 +53,39 @@ export class DispatchGate {
   ) {}
 
   dispatch(req: DispatchRequest): DispatchResult {
-    const permit = this.storage.store.transaction(() => {
+    const permit = this.permit(req);
+    if (!permit.ok) {
+      return { status: "rejected", reason: permit.reason, invocation_id: permit.invocation_id };
+    }
+    try {
+      return this.afterSend(req, permit.invocation_id, this.adapter.send(permit.invocation_id, req.payload));
+    } catch (err) {
+      return this.sendFailed(req, permit.invocation_id, err);
+    }
+  }
+
+  /**
+   * Async dispatch for worker paths. The permit (budget, locks, invocation) is
+   * still written in one short transaction; the actual send awaits outside it,
+   * and the settle writes afterwards. The event loop stays free during sends.
+   */
+  async dispatchAsync(req: DispatchRequest): Promise<DispatchResult> {
+    const permit = this.permit(req);
+    if (!permit.ok) {
+      return { status: "rejected", reason: permit.reason, invocation_id: permit.invocation_id };
+    }
+    try {
+      const sent = await this.adapter.sendAsync(permit.invocation_id, req.payload);
+      return this.afterSend(req, permit.invocation_id, sent);
+    } catch (err) {
+      return this.sendFailed(req, permit.invocation_id, err);
+    }
+  }
+
+  /** Linearization point: dispatching is written in the same transaction that
+   *  grants the send permit. Adapter send happens after that commit. */
+  private permit(req: DispatchRequest): { ok: true; invocation_id: string } | { ok: false; reason: string; invocation_id: string } {
+    return this.storage.store.transaction(() => {
       const camp = this.storage.getCampaign(req.lease.campaign_id);
       if (camp.cancel_epoch > req.lease.cancel_epoch || camp.state === "cancelled") {
         return { ok: false as const, reason: "cancel_epoch", invocation_id: "none" };
@@ -94,45 +124,44 @@ export class DispatchGate {
       this.invocations.mark(inv.id, "dispatching");
       return { ok: true as const, invocation_id: inv.id };
     });
-    if (!permit.ok) {
-      return { status: "rejected", reason: permit.reason, invocation_id: permit.invocation_id };
+  }
+
+  private afterSend(req: DispatchRequest, invocationId: string, sent: { execution_id: string; pending?: boolean }): DispatchResult {
+    this.invocations.mark(invocationId, "running", { status: sent.execution_id });
+    this.storage.store.db
+      .prepare("UPDATE invocations SET external_id = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(sent.execution_id, invocationId);
+    if (sent.pending) {
+      const next = new Date(Date.now() + 2_000).toISOString();
+      this.storage.registerOperation(req.lease.campaign_id, invocationId, sent.execution_id, "running");
+      this.storage.updateOperationState(sent.execution_id, "running", next);
+      return {
+        status: "sent",
+        invocation_id: invocationId,
+        execution_id: sent.execution_id,
+        pending: true,
+      };
     }
-    try {
-      const sent = this.adapter.send(permit.invocation_id, req.payload);
-      this.invocations.mark(permit.invocation_id, "running", { status: sent.execution_id });
-      this.storage.store.db
-        .prepare("UPDATE invocations SET external_id = ?, updated_at = datetime('now') WHERE id = ?")
-        .run(sent.execution_id, permit.invocation_id);
-      if (sent.pending) {
-        const next = new Date(Date.now() + 2_000).toISOString();
-        this.storage.registerOperation(req.lease.campaign_id, permit.invocation_id, sent.execution_id, "running");
-        this.storage.updateOperationState(sent.execution_id, "running", next);
-        return {
-          status: "sent",
-          invocation_id: permit.invocation_id,
-          execution_id: sent.execution_id,
-          pending: true,
-        };
-      }
-      this.storage.registerOperation(req.lease.campaign_id, permit.invocation_id, sent.execution_id, "completed");
-      this.invocations.mark(permit.invocation_id, "completed");
-      this.budget.settle(req.lease.campaign_id, permit.invocation_id, 1, 0, 0, 1, 0, 0);
-      this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, permit.invocation_id);
-      return { status: "sent", invocation_id: permit.invocation_id, execution_id: sent.execution_id };
-    } catch (err) {
-      if (
-        err instanceof DomainError &&
-        (err.category === "denied" || err.category === "invalid_input" || err.category === "protocol_error")
-      ) {
-        this.invocations.mark(permit.invocation_id, "failed_known", { error: String(err) });
-        this.budget.settle(req.lease.campaign_id, permit.invocation_id, 1, 0, 0, 1, 0, 0);
-        this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, permit.invocation_id);
-        return { status: "rejected", reason: `${err.code}:${err.message}`, invocation_id: permit.invocation_id };
-      }
-      this.invocations.mark(permit.invocation_id, "uncertain", { error: String(err) });
-      this.budget.markLiability(req.lease.campaign_id, permit.invocation_id, 1, 0, 0);
-      return { status: "in_flight", reason: String(err), invocation_id: permit.invocation_id };
+    this.storage.registerOperation(req.lease.campaign_id, invocationId, sent.execution_id, "completed");
+    this.invocations.mark(invocationId, "completed");
+    this.budget.settle(req.lease.campaign_id, invocationId, 1, 0, 0, 1, 0, 0);
+    this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, invocationId);
+    return { status: "sent", invocation_id: invocationId, execution_id: sent.execution_id };
+  }
+
+  private sendFailed(req: DispatchRequest, invocationId: string, err: unknown): DispatchResult {
+    if (
+      err instanceof DomainError &&
+      (err.category === "denied" || err.category === "invalid_input" || err.category === "protocol_error")
+    ) {
+      this.invocations.mark(invocationId, "failed_known", { error: String(err) });
+      this.budget.settle(req.lease.campaign_id, invocationId, 1, 0, 0, 1, 0, 0);
+      this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, invocationId);
+      return { status: "rejected", reason: `${err.code}:${err.message}`, invocation_id: invocationId };
     }
+    this.invocations.mark(invocationId, "uncertain", { error: String(err) });
+    this.budget.markLiability(req.lease.campaign_id, invocationId, 1, 0, 0);
+    return { status: "in_flight", reason: String(err), invocation_id: invocationId };
   }
 
   /** Record dispatching without sending. Used to simulate crash after permit, before adapter. */

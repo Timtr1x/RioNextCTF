@@ -374,12 +374,8 @@ export class KaliRuntime {
     );
   }
 
-  exec(
-    opts: KaliStartOpts,
-    bin: string,
-    args: string[],
-    extra?: { url?: string; redirects?: string[]; timeout_ms?: number; executionId?: string; background?: boolean },
-  ): DockerExecResult & { truncated: boolean; container: string; pending?: boolean } {
+  /** Admission shared by exec and execAsync: argv allowlist, egress, disk cap. */
+  private admitExec(opts: KaliStartOpts, bin: string, args: string[], extra?: { url?: string; redirects?: string[] }): void {
     assertKaliArgv(bin, args, opts.capabilities);
     const allow = parseAllowList(opts.allowAssets);
     const resolve = opts.resolve ?? ((h: string) => defaultResolve(h));
@@ -395,6 +391,175 @@ export class KaliRuntime {
     if (used > DEFAULT_KALI_LIMITS.maxWorkspaceBytes) {
       throw new DomainError("disk_cap", "workspace disk occupancy exceeds limit", "denied");
     }
+  }
+
+  /**
+   * Async exec for worker paths: admission is identical to exec, but the actual
+   * docker call awaits a spawned process, so a long foreground tool never blocks
+   * the event loop (other workers and heartbeats keep running).
+   */
+  async execAsync(
+    opts: KaliStartOpts,
+    bin: string,
+    args: string[],
+    extra?: { url?: string; redirects?: string[]; timeout_ms?: number; executionId?: string; background?: boolean; signal?: AbortSignal },
+  ): Promise<DockerExecResult & { truncated: boolean; container: string; pending?: boolean }> {
+    this.admitExec(opts, bin, args, extra);
+    const spec = await this.ensureAsync(opts, extra?.signal);
+    const background = extra?.background ?? shouldBackgroundKali(bin, extra?.timeout_ms);
+    if (background) {
+      const executionId = extra?.executionId ?? `kali_${opts.campaignId}_${Date.now()}`;
+      return this.execBackgroundAsync(opts, spec.name, bin, args, executionId, extra?.timeout_ms, extra?.signal);
+    }
+    const capSec = Math.ceil((extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) / 1000);
+    const argv = ["exec", "-w", containerRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
+    const result = await this.docker.runAsync(argv, {
+      timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
+      maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
+      signal: extra?.signal,
+    });
+    const truncated =
+      result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
+      result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
+    // Never kill a shared container on timeout: the `timeout` wrapper already
+    // reaped the process, and killing the box would nuke sibling campaigns.
+    if (result.timedOut && !opts.shared) this.kill(opts.campaignId);
+    const out = { ...result, truncated, container: spec.name };
+    this.last.set(opts.campaignId, out);
+    return out;
+  }
+
+  private async ensureAsync(opts: KaliStartOpts, signal?: AbortSignal): Promise<ContainerSpec> {
+    this.requireMasterImage(opts.image ?? KALI_IMAGE);
+    const spec = this.spec(opts);
+    const inspect = await this.docker.runAsync(["inspect", "-f", "{{.State.Running}}", spec.name], { timeoutMs: 5_000, signal });
+    if (inspect.code === 0 && inspect.stdout.trim() === "true") return spec;
+    await this.docker.runAsync(["rm", "-f", spec.name], { timeoutMs: 10_000, signal });
+    const created = await this.docker.runAsync(spec.argv, { timeoutMs: 30_000, signal });
+    if (created.code !== 0) {
+      throw new DomainError("kali_start", created.stderr || "docker run failed", "protocol_error");
+    }
+    for (let i = 0; i < 25; i++) {
+      const ready = await this.docker.runAsync(["inspect", "-f", "{{.State.Running}}", spec.name], { timeoutMs: 5_000, signal });
+      if (ready.code === 0 && ready.stdout.trim() === "true") return spec;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const died = await this.docker.runAsync(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", spec.name], { timeoutMs: 5_000 });
+    throw new DomainError(
+      "kali_start",
+      `campaign container ${spec.name} exited before exec (${died.stdout.trim() || "missing"})`,
+      "protocol_error",
+    );
+  }
+
+  private async execBackgroundAsync(
+    opts: KaliStartOpts,
+    container: string,
+    bin: string,
+    args: string[],
+    executionId: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<DockerExecResult & { truncated: boolean; container: string; pending: boolean }> {
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
+    mkdirSync(dirname(files.sh), { recursive: true });
+    const capSec = Math.ceil((timeoutMs ?? DEFAULT_KALI_LIMITS.maxBackgroundRuntimeMs) / 1000);
+    const quoted = [bin, ...args].map(shQuote).join(" ");
+    const script = [
+      "#!/bin/sh",
+      "set +e",
+      `timeout ${capSec} ${quoted} > ${shQuote(files.containerOut)} 2> ${shQuote(files.containerErr)}`,
+      `echo $? > ${shQuote(files.containerExit)}`,
+      "",
+    ].join("\n");
+    writeFileSync(files.sh, script, { encoding: "utf8" });
+    const started = await this.docker.runAsync(["exec", "-d", "-w", containerRootOf(opts), container, "sh", files.containerSh], {
+      timeoutMs: 15_000,
+      signal,
+    });
+    if (started.code !== 0) {
+      throw new DomainError("kali_start", started.stderr || "background exec failed", "protocol_error");
+    }
+    const out = {
+      stdout: JSON.stringify({ pending: true, execution_id: executionId, path: files.containerOut }),
+      stderr: "",
+      code: 0,
+      timedOut: false,
+      truncated: false,
+      container,
+      pending: true as const,
+    };
+    this.last.set(opts.campaignId, out);
+    return out;
+  }
+
+  async playwrightAsync(
+    opts: KaliStartOpts,
+    cmd: { op: string; url?: string; ref?: string; selector?: string; text?: string; key?: string; timeout_ms?: number; redirects?: string[] },
+    signal?: AbortSignal,
+  ): Promise<DockerExecResult & { truncated: boolean; container: string }> {
+    if (!PLAYWRIGHT_OPS.has(cmd.op)) {
+      throw new DomainError("playwright_op", `unknown playwright op ${cmd.op}`, "invalid_input");
+    }
+    if (cmd.op === "goto" && cmd.url) {
+      const allow = parseAllowList(opts.allowAssets);
+      const resolve = opts.resolve ?? ((h: string) => defaultResolve(h));
+      this.admitNet(cmd.url, allow, resolve, cmd.redirects ?? []);
+    }
+    const spec = await this.ensureAsync(opts, signal);
+    const result = await this.docker.runAsync(["exec", "-i", spec.name, "node", "/opt/rionext/pw-ctl.mjs"], {
+      input: JSON.stringify(cmd),
+      timeoutMs: Math.max(DEFAULT_KALI_LIMITS.maxRuntimeMs, cmd.timeout_ms ?? 0) + 5_000,
+      maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
+      signal,
+    });
+    const truncated =
+      result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
+      result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
+    const out = { ...result, truncated, container: spec.name };
+    this.last.set(opts.campaignId, out);
+    return out;
+  }
+
+  async writeWorkspaceAsync(
+    opts: KaliStartOpts,
+    path: string,
+    content: string,
+    signal?: AbortSignal,
+  ): Promise<DockerExecResult & { truncated: boolean; container: string }> {
+    const rel = workspaceRelPath(path);
+    if (content.length > DEFAULT_KALI_LIMITS.maxOutputBytes) {
+      throw new DomainError("disk_cap", "workspace write exceeds output cap", "denied");
+    }
+    mkdirSync(opts.workspaceHost, { recursive: true });
+    const used = workspaceBytes(opts.workspaceHost);
+    if (used + content.length > DEFAULT_KALI_LIMITS.maxWorkspaceBytes) {
+      throw new DomainError("disk_cap", "workspace disk occupancy exceeds limit", "denied");
+    }
+    const dest = join(opts.workspaceHost, rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, content, "utf8");
+    const spec = await this.ensureAsync(opts, signal);
+    const body = JSON.stringify({ ok: true, path: `/workspace/${rel.replace(/\\/g, "/")}`, bytes: Buffer.byteLength(content, "utf8") });
+    const out = {
+      stdout: body,
+      stderr: "",
+      code: 0,
+      timedOut: false,
+      truncated: false,
+      container: spec.name,
+    };
+    this.last.set(opts.campaignId, out);
+    return out;
+  }
+
+  exec(
+    opts: KaliStartOpts,
+    bin: string,
+    args: string[],
+    extra?: { url?: string; redirects?: string[]; timeout_ms?: number; executionId?: string; background?: boolean },
+  ): DockerExecResult & { truncated: boolean; container: string; pending?: boolean } {
+    this.admitExec(opts, bin, args, extra);
     const spec = this.ensure(opts);
     const background = extra?.background ?? shouldBackgroundKali(bin, extra?.timeout_ms);
     if (background) {

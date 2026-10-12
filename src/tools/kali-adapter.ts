@@ -81,6 +81,60 @@ export class KaliEffectAdapter implements EffectAdapter {
     }
   }
 
+  async sendAsync(
+    invocationId: string,
+    payload: unknown,
+    signal?: AbortSignal,
+  ): Promise<{ execution_id: string; pending?: boolean }> {
+    if (!isKaliPayload(payload)) throw new DomainError("kali_payload", "not a kali payload", "invalid_input");
+    this.n += 1;
+    const execution_id = `kali_${invocationId}`;
+    const opts = this.optsFor(invocationId);
+    try {
+      const result =
+        payload.kind === "playwright" || payload.kind === "browser"
+          ? await this.runtime.playwrightAsync(
+              opts,
+              {
+                op: payload.kind === "browser" ? "goto" : String(payload.op ?? "snapshot"),
+                url: payload.url,
+                ref: payload.ref,
+                selector: payload.selector,
+                text: payload.text,
+                key: payload.key,
+                timeout_ms: payload.timeout_ms,
+                redirects: payload.redirects,
+              },
+              signal,
+            )
+          : payload.kind === "kali_write" || payload.op === "write"
+            ? await this.runtime.writeWorkspaceAsync(opts, String(payload.path ?? ""), String(payload.content ?? ""), signal)
+            : await this.runtime.execAsync(opts, String(payload.bin ?? "nmap"), payload.args ?? [], {
+                url: payload.url,
+                redirects: payload.redirects,
+                timeout_ms: payload.timeout_ms,
+                executionId: execution_id,
+                background: shouldBackgroundKali(String(payload.bin ?? "nmap"), payload.timeout_ms),
+                signal,
+              });
+      const pending = Boolean((result as { pending?: boolean }).pending);
+      this.last.set(execution_id, pending ? "unknown" : result.code === 0 ? "completed" : "failed");
+      (payload as KaliPayload & { _result?: unknown })._result = {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        code: result.code,
+        truncated: result.truncated,
+        container: result.container,
+        timedOut: result.timedOut,
+        pending,
+      };
+      return { execution_id, pending };
+    } catch (err) {
+      this.last.set(execution_id, "failed");
+      throw err;
+    }
+  }
+
   query(executionId: string): "unknown" | "completed" | "failed" {
     const mem = this.last.get(executionId);
     if (mem === "completed" || mem === "failed") return mem;
@@ -121,6 +175,11 @@ export class RoutingEffectAdapter implements EffectAdapter {
   send(invocationId: string, payload: unknown): { execution_id: string } {
     if (isKaliPayload(payload)) return this.kali.send(invocationId, payload);
     return this.file.send(invocationId, payload);
+  }
+
+  sendAsync(invocationId: string, payload: unknown): Promise<{ execution_id: string; pending?: boolean }> {
+    if (isKaliPayload(payload)) return this.kali.sendAsync(invocationId, payload);
+    return this.file.sendAsync(invocationId, payload);
   }
 
   query(executionId: string): "unknown" | "completed" | "failed" {

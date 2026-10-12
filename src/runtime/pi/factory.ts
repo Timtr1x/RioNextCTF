@@ -251,6 +251,7 @@ export class PiWorker implements WorkerRuntime {
           effect: env ? "unknown" : "pure",
           envTool: env,
           controlPlane: terminal ? "terminal" : undefined,
+          signal: this.abortCtrl?.signal,
         });
         if (!admitted.allowed) {
           if (admitted.reason === "finish_closed_env") this.finishThenBlocked += 1;

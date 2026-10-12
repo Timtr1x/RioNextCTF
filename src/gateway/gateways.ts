@@ -58,6 +58,8 @@ export interface ToolInvokeRequest {
   lease: RunLease;
   effect: EffectClass;
   envTool: boolean;
+  /** Worker cancellation: aborts only this invocation's process. */
+  signal?: AbortSignal;
   controlPlane?: "terminal";
 }
 
@@ -266,13 +268,14 @@ export class ToolGateway {
       }
       const ms = Math.max(1, this.lease.deadline_ms - Date.now());
       try {
-        const timed = await runWithOuterDeadline(ms, async () =>
-          this.dispatchGate!.dispatch({
+        const timed = await runWithOuterDeadline(ms, () =>
+          this.dispatchGate!.dispatchAsync({
             lease: this.lease,
             purpose: req.name,
             payload: req.args,
             effect: req.effect,
             envTool: true,
+            signal: req.signal,
           }),
         );
         if (!timed.ok || !timed.value) {

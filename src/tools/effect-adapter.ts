@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 export interface EffectAdapter {
   send(invocationId: string, payload: unknown): { execution_id: string; pending?: boolean };
+  /** Async send for worker paths; implementations must not block the loop. */
+  sendAsync(invocationId: string, payload: unknown): Promise<{ execution_id: string; pending?: boolean }>;
   query(executionId: string): "unknown" | "completed" | "failed";
   sendCount(): number;
 }
@@ -23,6 +25,10 @@ export class FileEffectAdapter implements EffectAdapter {
     writeFileSync(join(this.root, `${execution_id}.json`), JSON.stringify(rec));
     writeFileSync(join(this.root, "send_count"), String(this.n));
     return { execution_id };
+  }
+
+  sendAsync(invocationId: string, payload: unknown): Promise<{ execution_id: string }> {
+    return Promise.resolve(this.send(invocationId, payload));
   }
 
   query(executionId: string): "unknown" | "completed" | "failed" {
