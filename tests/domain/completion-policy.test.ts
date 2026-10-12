@@ -285,3 +285,77 @@ test("R02-06/07: repair un-parks a mis-parked assessment, never a CTF flag campa
   assert.equal(e.storage.getCampaign("r02ctf").state, "awaiting_verify");
   e.close();
 });
+
+// --- R04: one gate for every success path, with freshness ---
+
+test("R04-01: tested coverage with stale evidence does not close a strict task", () => {
+  const r = evaluateCompletion(
+    baseSnap({
+      mode: "goal_seeking",
+      root_goal_satisfied: true,
+      require_complete: true,
+      coverage: [
+        { id: "c1", mandatory: true, applicability: "applicable", execution_state: "tested", outcome: "no_issue_observed", evidence_state: "stale" },
+      ],
+    }),
+  );
+  assert.equal(r.canClose, false);
+  assert.ok(r.blockers.includes("coverage_evidence_not_current"));
+});
+
+test("R04-02: tested but inconclusive coverage is not a strict completion", () => {
+  const r = evaluateCompletion(
+    baseSnap({
+      mode: "goal_seeking",
+      root_goal_satisfied: true,
+      require_complete: true,
+      coverage: [
+        { id: "c1", mandatory: true, applicability: "applicable", execution_state: "tested", outcome: "inconclusive", evidence_state: "current" },
+      ],
+    }),
+  );
+  assert.equal(r.canClose, false);
+  assert.ok(r.blockers.includes("coverage_inconclusive"));
+});
+
+test("R04-03: applicable mandatory obligations blocked or untested do not close", () => {
+  for (const execution_state of ["blocked", "untested", "in_progress"] as const) {
+    const r = evaluateCompletion(
+      baseSnap({
+        mode: "goal_seeking",
+        root_goal_satisfied: true,
+        require_complete: true,
+        coverage: [{ id: "c1", mandatory: true, applicability: "applicable", execution_state, outcome: "none", evidence_state: "missing" }],
+      }),
+    );
+    assert.equal(r.canClose, false, execution_state);
+  }
+});
+
+test("R04-04: undecided applicability is not a silent skip under strict coverage", () => {
+  const r = evaluateCompletion(
+    baseSnap({
+      mode: "goal_seeking",
+      root_goal_satisfied: true,
+      require_complete: true,
+      coverage: [{ id: "c1", mandatory: true, applicability: "unknown", execution_state: "untested", outcome: "none", evidence_state: "missing" }],
+    }),
+  );
+  assert.equal(r.canClose, false);
+  assert.ok(r.blockers.includes("coverage_applicability_undecided"));
+});
+
+test("R04-05: not_applicable and waived obligations pass with their reasons intact", () => {
+  const r = evaluateCompletion(
+    baseSnap({
+      mode: "goal_seeking",
+      root_goal_satisfied: true,
+      require_complete: true,
+      coverage: [
+        { id: "c1", mandatory: true, applicability: "not_applicable", execution_state: "untested", outcome: "none", evidence_state: "missing" },
+        { id: "c2", mandatory: true, applicability: "applicable", execution_state: "waived", outcome: "none", evidence_state: "missing" },
+      ],
+    }),
+  );
+  assert.equal(r.canClose, true);
+});

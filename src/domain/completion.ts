@@ -98,6 +98,36 @@ export function completeCoverageRequired(mode: string, explicit?: boolean): bool
 
 const FINDING_PENDING_STATUSES = new Set(["suspected", "validating", "inconclusive", "stale"]);
 
+/**
+ * Per-item strict coverage gate. A mandatory obligation passes only via a legal
+ * path: not_applicable recorded as such, an explicit waiver, or a tested state
+ * whose evidence is current and whose outcome is usable (no_issue_observed,
+ * suspected, confirmed). tested+inconclusive and tested+stale/missing evidence
+ * are not completions; undecided applicability is not a silent skip.
+ */
+function coverageGateBlockers(snap: CompletionSnapshot): string[] {
+  const blockers: string[] = [];
+  for (const c of snap.coverage) {
+    if (!c.mandatory) continue;
+    if (c.applicability === "not_applicable") continue;
+    if (c.applicability === "unknown") {
+      blockers.push("coverage_applicability_undecided");
+      continue;
+    }
+    if (c.execution_state === "waived") continue;
+    if (c.execution_state === "tested") {
+      if (c.outcome === "inconclusive") {
+        blockers.push("coverage_inconclusive");
+      } else if (c.evidence_state !== "current") {
+        blockers.push("coverage_evidence_not_current");
+      }
+      continue;
+    }
+    blockers.push("mandatory_coverage_untested");
+  }
+  return [...new Set(blockers)];
+}
+
 /** Explicit delivery requirements that must hold before canClose=true. */
 function deliveryGateBlockers(snap: CompletionSnapshot): string[] {
   const blockers: string[] = [];
@@ -106,12 +136,9 @@ function deliveryGateBlockers(snap: CompletionSnapshot): string[] {
     if (pending.length > 0) blockers.push("findings_pending_verification");
   }
   if (completeCoverageRequired(snap.mode, snap.require_complete)) {
-    const mandatoryUntested = snap.coverage.filter(
-      (c) => c.mandatory && c.applicability === "applicable" && c.execution_state !== "tested" && c.execution_state !== "waived",
-    );
-    if (mandatoryUntested.length > 0) blockers.push("mandatory_coverage_untested");
+    blockers.push(...coverageGateBlockers(snap));
   }
-  return blockers;
+  return [...new Set(blockers)];
 }
 
 export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
@@ -180,29 +207,15 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
   }
 
   if (completeCoverageRequired(snap.mode, snap.require_complete)) {
-    const mandatoryUntested = snap.coverage.filter(
-      (c) => c.mandatory && c.applicability === "applicable" && c.execution_state !== "tested" && c.execution_state !== "waived",
-    );
-    if (mandatoryUntested.length > 0) {
-      blockers.push("mandatory_coverage_untested");
+    const covBlockers = coverageGateBlockers(snap);
+    if (covBlockers.length > 0) {
+      blockers.push(...covBlockers);
       if (snap.blocked_steps > 0) {
         return { canClose: false, suggestedState: "blocked", blockers };
       }
       if (snap.empty_reviews < snap.max_empty_reviews) {
         return { canClose: false, suggestedState: "active", blockers: [...blockers, "review_allowance_remaining"] };
       }
-      return { canClose: false, suggestedState: "plateau", blockers };
-    }
-
-    const mandatoryBadEvidence = snap.coverage.filter(
-      (c) =>
-        c.mandatory &&
-        c.applicability === "applicable" &&
-        c.execution_state === "tested" &&
-        (c.evidence_state === "stale" || c.evidence_state === "missing"),
-    );
-    if (mandatoryBadEvidence.length > 0) {
-      blockers.push("coverage_evidence_not_current");
       return { canClose: false, suggestedState: "plateau", blockers };
     }
   }
