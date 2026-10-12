@@ -146,17 +146,54 @@ function omittedEntry(kind: string, total: number, included: number): OmittedEnt
   };
 }
 
-/** Fact ids referenced by the current step: input_refs plus fact_key mentions. */
+/** Fact selectors referenced by the current step. input_refs are EntityRef
+ *  objects ({id, revision}) in production; legacy string arrays still read as
+ *  ids. Preconditions are PredicateExpr: recurse all/any.of, collecting
+ *  atom.fact_id as ids and atom.key as fact keys. No regex on free text. */
 function linkedFactSelectors(storage: StorageService, stepId: string | null): { ids: string[]; keys: string[] } {
   if (!stepId) return { ids: [], keys: [] };
   const row = storage.store.db
     .prepare("SELECT input_refs_json, preconditions_json FROM steps WHERE id = ?")
     .get(stepId) as { input_refs_json: string; preconditions_json: string } | undefined;
   if (!row) return { ids: [], keys: [] };
-  const ids = parseRefs(row.input_refs_json);
+  const ids = parseRefIds(row.input_refs_json);
   const keys: string[] = [];
-  for (const m of row.preconditions_json.matchAll(/"fact_key"\s*:\s*"([^"]+)"/g)) keys.push(m[1]!);
-  return { ids, keys };
+  const walk = (expr: unknown): void => {
+    if (!expr || typeof expr !== "object") return;
+    const e = expr as { op?: unknown; fact_id?: unknown; key?: unknown; of?: unknown };
+    if (e.op === "atom") {
+      if (typeof e.fact_id === "string" && e.fact_id) ids.push(e.fact_id);
+      if (typeof e.key === "string" && e.key) keys.push(e.key);
+      return;
+    }
+    if ((e.op === "all" || e.op === "any") && Array.isArray(e.of)) {
+      for (const sub of e.of) walk(sub);
+    }
+  };
+  try {
+    walk(JSON.parse(row.preconditions_json));
+  } catch {
+    // malformed preconditions yield no links
+  }
+  return { ids: [...new Set(ids)], keys: [...new Set(keys)] };
+}
+
+/** input_refs entries: production EntityRef objects, plus the legacy string form. */
+function parseRefIds(json: string): string[] {
+  try {
+    const v = JSON.parse(json) as unknown;
+    if (!Array.isArray(v)) return [];
+    const out: string[] = [];
+    for (const item of v) {
+      if (typeof item === "string") out.push(item);
+      else if (item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string") {
+        out.push((item as { id: string }).id);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /**

@@ -137,9 +137,10 @@ test("G03: facts linked by the current step stay in view even when old", () => {
     insertFact(e, "mv-g03", "fact_anchor", "old but load-bearing precondition evidence", { seq: 1 });
     for (let i = 0; i < 65; i++) insertFact(e, "mv-g03", `f_${i}`, `noise ${i}`, { seq: 100 + i });
     insertStep(e, "mv-g03", "step_cur", "ready", 500);
+    // production input_refs are EntityRef objects, not bare strings
     e.storage.store.db
       .prepare("UPDATE steps SET input_refs_json = ? WHERE id = ?")
-      .run(JSON.stringify(["fact_anchor"]), "step_cur");
+      .run(JSON.stringify([{ id: "fact_anchor", revision: 1 }]), "step_cur");
     const pack = buildContextPack(e.storage, lease("mv-g03", "execute", "step_cur"));
     const facts = (pack.user_payload as { graph: { facts: { id: string }[] } }).graph.facts;
     assert.ok(facts.some((f) => f.id === "fact_anchor"), "linked fact must survive");
@@ -285,6 +286,92 @@ test("model payload hides control fields; resources are scalars", () => {
     assert.equal(typeof resources.remaining_calls === "number" || resources.remaining_calls === null, true);
     // the manifest still carries the real snapshot for internal use
     assert.equal(typeof pack.manifest.graph_snapshot_seq, "number");
+  } finally {
+    e.close();
+  }
+});
+
+// --- R05: dependency links survive the real formats ---
+
+test("R05-02/03/04: precondition atoms and nesting pull in old facts", () => {
+  const e = boot("mv-r05");
+  try {
+    insertFact(e, "mv-r05", "fact_byid", "linked by fact_id", { seq: 1 });
+    insertFact(e, "mv-r05", "fact_bykey", "linked by key", { seq: 2, key: "handshake_done" });
+    insertFact(e, "mv-r05", "fact_nested", "linked deep in any/all", { seq: 3 });
+    for (let i = 0; i < 65; i++) insertFact(e, "mv-r05", `f_${i}`, `noise ${i}`, { seq: 100 + i });
+    insertStep(e, "mv-r05", "step_cur", "ready", 500);
+    e.storage.store.db
+      .prepare("UPDATE steps SET preconditions_json = ? WHERE id = ?")
+      .run(
+        JSON.stringify({
+          op: "all",
+          of: [
+            { op: "atom", fact_id: "fact_byid" },
+            { op: "any", of: [{ op: "atom", key: "handshake_done" }, { op: "all", of: [{ op: "atom", fact_id: "fact_nested" }] }] },
+          ],
+        }),
+        "step_cur",
+      );
+    const pack = buildContextPack(e.storage, lease("mv-r05", "execute", "step_cur"));
+    const facts = (pack.user_payload as { graph: { facts: { id: string }[] } }).graph.facts;
+    assert.ok(facts.some((f) => f.id === "fact_byid"), "atom.fact_id");
+    assert.ok(facts.some((f) => f.id === "fact_bykey"), "atom.key");
+    assert.ok(facts.some((f) => f.id === "fact_nested"), "nested all/any");
+  } finally {
+    e.close();
+  }
+});
+
+test("R05-05/06: linked facts dedupe and never upgrade disputed state", () => {
+  const e = boot("mv-r05b");
+  try {
+    insertFact(e, "mv-r05b", "fact_dis", "contested dependency", { seq: 1, status: "disputed", counters: ["obs_9"] });
+    insertStep(e, "mv-r05b", "step_cur", "ready", 500);
+    e.storage.store.db
+      .prepare("UPDATE steps SET input_refs_json = ?, preconditions_json = ? WHERE id = ?")
+      .run(JSON.stringify([{ id: "fact_dis", revision: 1 }]), JSON.stringify({ op: "all", of: [{ op: "atom", fact_id: "fact_dis" }] }), "step_cur");
+    const pack = buildContextPack(e.storage, lease("mv-r05b", "execute", "step_cur"));
+    const facts = (pack.user_payload as { graph: { facts: { id: string; state: string; counter_refs: string[] }[] } }).graph.facts;
+    const hits = facts.filter((f) => f.id === "fact_dis");
+    assert.equal(hits.length, 1, "referenced twice, shown once");
+    assert.equal(hits[0]!.state, "disputed");
+    assert.deepEqual(hits[0]!.counter_refs, ["obs_9"]);
+  } finally {
+    e.close();
+  }
+});
+
+test("R05-09: a production-created step's input refs land in the view and manifest", () => {
+  const e = boot("mv-r05c");
+  try {
+    insertFact(e, "mv-r05c", "fact_prod", "production-linked", { seq: 1 });
+    for (let i = 0; i < 65; i++) insertFact(e, "mv-r05c", `f_${i}`, `noise ${i}`, { seq: 100 + i });
+    const fact = e.storage.list("facts", "mv-r05c").find((f) => f.id === "fact_prod")!;
+    const root = (e.storage.store.db.prepare("SELECT id FROM goals WHERE campaign_id = ? AND is_root = 1").get("mv-r05c") as { id: string }).id;
+    const result = e.storage.proposeStepDirect({
+      campaign_id: "mv-r05c",
+      producer_id: "t",
+      submission_id: "r05c-step",
+      question: "verify the linked dependency",
+      kind: "explore",
+      goal_refs: [root],
+      preconditions: { op: "all", of: [] },
+      method_family: "generic",
+      expected_observations: [],
+      completion_criteria: "done",
+      fingerprint: "r05c-fp",
+      reopen_rule: { kind: "always" },
+      input_refs: [{ id: String(fact.id), revision: Number(fact.revision) }],
+    });
+    const stepId = String(result.canonical_ids.step_id);
+    const pack = buildContextPack(e.storage, lease("mv-r05c", "execute", stepId));
+    const facts = (pack.user_payload as { graph: { facts: { id: string }[] } }).graph.facts;
+    assert.ok(facts.some((f) => f.id === "fact_prod"), "production input_refs surface the linked fact");
+    assert.ok(
+      pack.manifest.selected_entity_revisions.some((r) => r.table === "facts" && r.id === "fact_prod"),
+      "and its revision enters the internal read set",
+    );
   } finally {
     e.close();
   }
