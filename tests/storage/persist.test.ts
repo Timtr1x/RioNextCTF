@@ -535,7 +535,11 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
 
   // now a finish carrying an explicit result marks exactly that item; the
   // supporting observation is produced by the run that cites it
-  e2.storage.store.db.prepare("UPDATE steps SET status = 'ready' WHERE fingerprint = 'f36-fp'").run();
+  const covRow = e2.storage.list("coverage_items", spec.campaign_id).find((c) => c.id === covId)!;
+  e2.storage.store.db
+    .prepare("UPDATE steps SET status = 'ready', input_refs_json = ? WHERE fingerprint = 'f36-fp'")
+    .run(JSON.stringify([{ id: covId, revision: Number(covRow.revision ?? 1) }]));
+
   const claimed2 = e2.storage.claimNextStep(spec.campaign_id, "t", e2.storage.getCampaign(spec.campaign_id).epoch)!;
   const obs2 = e2.storage.recordObservation({
     campaign_id: spec.campaign_id,

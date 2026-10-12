@@ -61,8 +61,13 @@ async function rig(id: string): Promise<Rig> {
     reopen_rule: { kind: "always" },
   });
   e.storage.finishRun(id, decide.run_id, outcome(decide.run_id));
-  const claimed = e.storage.claimNextStep(id, "t", 1)!;
   const covId = String(e.storage.list("coverage_items", id).find((c) => c.obligation === "inspect-desk")!.id);
+  const covRow = e.storage.list("coverage_items", id).find((c) => c.id === covId)!;
+  e.storage.store.db.prepare("UPDATE steps SET input_refs_json = ? WHERE fingerprint = ?").run(
+    JSON.stringify([{ id: covId, revision: Number(covRow.revision ?? 1) }]),
+    `${id}-fp`,
+  );
+  const claimed = e.storage.claimNextStep(id, "t", 1)!;
   return { e, covId, runId: claimed.run_id, fence: claimed.fence };
 }
 
@@ -237,5 +242,16 @@ test("R03-07: a legally confirmed finding with shared evidence backs a confirmed
   const state = covState(r.e, "r03e", r.covId);
   assert.equal(state.execution_state, "tested");
   assert.equal(state.outcome, "confirmed");
+  r.e.close();
+});
+
+test("F03: a fresh observation without the step declaring the obligation is rejected", async () => {
+  const r = await rigNamed("f03");
+  // strip the declaration: the step no longer names the coverage item
+  r.e.storage.store.db.prepare("UPDATE steps SET input_refs_json = '[]'").run();
+  const good = obs(r.e, "f03", r.runId);
+  const { rejected } = finishWith(r, { coverage_id: r.covId, outcome: "no_issue_observed", evidence_refs: [good], note: "fresh but undeclared" });
+  assert.ok(rejected.some((x) => x.includes("coverage_not_declared")), JSON.stringify(rejected));
+  assert.notEqual(covState(r.e, "f03", r.covId).execution_state, "tested");
   r.e.close();
 });

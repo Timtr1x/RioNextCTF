@@ -9,6 +9,7 @@
  * counter evidence, anything not validity=current is "stale" and can never be
  * summarized as known.
  */
+import { collectFactRefs } from "../domain/predicates.ts";
 import type { ReadSetEntry } from "../domain/types.ts";
 import type { StorageService } from "../storage/service.ts";
 
@@ -106,7 +107,7 @@ function parseRefs(json: string): string[] {
   }
 }
 
-export function projectFact(row: FactRow): ModelFact {
+export function projectFact(row: FactRow, detail = false): ModelFact {
   const state: ModelFact["state"] =
     row.validity !== "current"
       ? "stale"
@@ -117,23 +118,23 @@ export function projectFact(row: FactRow): ModelFact {
           : "hypothesis";
   return {
     id: row.id,
-    claim: clip(row.proposition, CLAIM_CAP),
+    claim: detail ? row.proposition : clip(row.proposition, CLAIM_CAP),
     state,
     evidence_refs: parseRefs(row.support_refs_json),
     counter_refs: parseRefs(row.counter_refs_json),
   };
 }
 
-export function projectStep(row: StepRow): ModelStep {
+export function projectStep(row: StepRow, detail = false): ModelStep {
   const out: ModelStep = {
     id: row.id,
-    question: clip(row.question, QUESTION_CAP),
+    question: detail ? row.question : clip(row.question, QUESTION_CAP),
     status: row.status,
     priority: row.priority,
   };
   if (row.method_family) out.method_family = row.method_family;
-  if (row.next_action) out.next_action = clip(row.next_action, 200);
-  if (row.last_failure) out.last_failure = clip(row.last_failure, 200);
+  if (row.next_action) out.next_action = detail ? row.next_action : clip(row.next_action, 200);
+  if (row.last_failure) out.last_failure = detail ? row.last_failure : clip(row.last_failure, 200);
   return out;
 }
 
@@ -159,21 +160,11 @@ function linkedFactSelectors(storage: StorageService, stepId: string | null): { 
     .get(stepId) as { input_refs_json: string; preconditions_json: string } | undefined;
   if (!row) return { ids: [], keys: [] };
   const ids = parseRefIds(row.input_refs_json);
-  const keys: string[] = [];
-  const walk = (expr: unknown): void => {
-    if (!expr || typeof expr !== "object") return;
-    const e = expr as { op?: unknown; fact_id?: unknown; key?: unknown; of?: unknown };
-    if (e.op === "atom") {
-      if (typeof e.fact_id === "string" && e.fact_id) ids.push(e.fact_id);
-      if (typeof e.key === "string" && e.key) keys.push(e.key);
-      return;
-    }
-    if ((e.op === "all" || e.op === "any") && Array.isArray(e.of)) {
-      for (const sub of e.of) walk(sub);
-    }
-  };
+  let keys: string[] = [];
   try {
-    walk(JSON.parse(row.preconditions_json));
+    const refs = collectFactRefs(JSON.parse(row.preconditions_json));
+    ids.push(...refs.ids);
+    keys = refs.keys;
   } catch {
     // malformed preconditions yield no links
   }
@@ -285,7 +276,7 @@ export function buildModelGraphView(
 
   const view: ModelGraphView = {
     goals,
-    steps: shownSteps.map(projectStep),
+    steps: shownSteps.map((s) => projectStep(s)),
     facts,
     findings,
     omitted,
@@ -329,9 +320,9 @@ export function buildModelGraphView(
 export function projectGraphItems(entity: string, items: unknown[]): unknown[] {
   switch (entity) {
     case "facts":
-      return items.map((i) => projectFact(i as unknown as FactRow));
+      return items.map((i) => projectFact(i as unknown as FactRow, true));
     case "steps":
-      return items.map((i) => projectStep(i as unknown as StepRow));
+      return items.map((i) => projectStep(i as unknown as StepRow, true));
     case "findings":
       return items.map((i) => {
         const r = i as { id: string; claim: string; status: string; evidence_refs_json: string };

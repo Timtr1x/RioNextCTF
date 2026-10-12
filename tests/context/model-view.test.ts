@@ -446,3 +446,20 @@ test("R06-07: ids detail reads return business content without control columns",
     e.close();
   }
 });
+
+test("F04: detail reads return the full business content, overviews stay clipped", () => {
+  const e = boot("mv-f04");
+  try {
+    const longClaim = `prefix-${"x".repeat(600)}-tail-marker`;
+    insertFact(e, "mv-f04", "fact_long", longClaim, { seq: 1 });
+    const raw = e.storage.graphQuery("mv-f04", { entity: "facts", ids: ["fact_long"] });
+    const detail = projectGraphItems("facts", raw.items) as { claim: string }[];
+    assert.ok(detail[0]!.claim.endsWith("tail-marker"), "detail read carries the full claim");
+    // the overview still clips
+    const pack = buildContextPack(e.storage, lease("mv-f04", "decide", null));
+    const overview = (pack.user_payload as { graph: { facts: { claim: string }[] } }).graph.facts.find((f) => f.claim.includes("prefix-"));
+    assert.ok(overview && overview.claim.length < longClaim.length, "overview stays compact");
+  } finally {
+    e.close();
+  }
+});

@@ -14,6 +14,7 @@ export function applyVerification(
   campaignId: string,
   findingId: string,
   cls: VerifyFailClass | "confirmed",
+  evidenceRefs: string[] = [],
 ): FindingStatus {
   const finding = storage.store.db
     .prepare("SELECT status FROM findings WHERE id = ? AND campaign_id = ?")
@@ -26,6 +27,17 @@ export function applyVerification(
   const cur = (storage.store.db.prepare("SELECT status FROM findings WHERE id = ?").get(findingId) as { status: FindingStatus }).status;
   if (cur !== next) {
     storage.setFindingStatus(campaignId, findingId, next, { kind: "controller", id: "verify" });
+  }
+  // The verdict's evidence persists on the finding, not only in the event log.
+  if (evidenceRefs.length > 0) {
+    const row = storage.store.db.prepare("SELECT verification_refs_json FROM findings WHERE id = ?").get(findingId) as {
+      verification_refs_json: string;
+    };
+    const cur2 = new Set(JSON.parse(row.verification_refs_json) as string[]);
+    for (const r of evidenceRefs) cur2.add(r);
+    storage.store.db
+      .prepare("UPDATE findings SET verification_refs_json = ?, revision = revision + 1, updated_seq = updated_seq WHERE id = ?")
+      .run(JSON.stringify([...cur2]), findingId);
   }
   if (cls === "missing_condition") {
     storage.updateCoverage(campaignId, "verify", { outcome: "inconclusive", execution_state: "blocked" });

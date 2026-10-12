@@ -1443,6 +1443,29 @@ export class StorageService {
         reject(r.coverage_id, "missing_evidence");
         continue;
       }
+      // The step must declare this obligation up front (input_refs); a fresh
+      // observation alone must not endorse an arbitrary obligation.
+      const stepId = run.step_id ? String(run.step_id) : null;
+      const stepRow = stepId
+        ? (this.store.db.prepare("SELECT input_refs_json FROM steps WHERE id = ?").get(stepId) as
+            | { input_refs_json: string }
+            | undefined)
+        : undefined;
+      let declared: string[] = [];
+      try {
+        const parsed = JSON.parse(stepRow?.input_refs_json ?? "[]") as unknown;
+        if (Array.isArray(parsed)) {
+          declared = parsed
+            .map((x) => (typeof x === "string" ? x : x && typeof x === "object" ? String((x as { id?: unknown }).id ?? "") : ""))
+            .filter((x) => x.length > 0);
+        }
+      } catch {
+        declared = [];
+      }
+      if (!declared.includes(r.coverage_id)) {
+        reject(r.coverage_id, "coverage_not_declared");
+        continue;
+      }
       // The obligation must be backed by THIS run's test record: at least one
       // observation produced here, in the current env. Old-env observations or
       // other runs' leftovers never mark an item tested/current.
@@ -1470,8 +1493,8 @@ export class StorageService {
           continue;
         }
         const finding = this.store.db
-          .prepare("SELECT status, evidence_refs_json FROM findings WHERE id = ? AND campaign_id = ?")
-          .get(r.finding_id, campaignId) as { status: string; evidence_refs_json: string } | undefined;
+          .prepare("SELECT status, evidence_refs_json, verification_refs_json FROM findings WHERE id = ? AND campaign_id = ?")
+          .get(r.finding_id, campaignId) as { status: string; evidence_refs_json: string; verification_refs_json: string } | undefined;
         if (!finding) {
           reject(r.coverage_id, "finding_not_in_campaign");
           continue;
@@ -1483,7 +1506,10 @@ export class StorageService {
         let findingRefs: string[] = [];
         try {
           const parsed = JSON.parse(finding.evidence_refs_json) as unknown;
-          if (Array.isArray(parsed)) findingRefs = parsed.filter((x): x is string => typeof x === "string");
+          const verification = JSON.parse(finding.verification_refs_json ?? "[]") as unknown;
+          for (const v of [parsed, verification]) {
+            if (Array.isArray(v)) findingRefs.push(...v.filter((x): x is string => typeof x === "string"));
+          }
         } catch {
           findingRefs = [];
         }
@@ -1647,11 +1673,22 @@ export class StorageService {
         return;
       }
     }
-    const applied = findingRow
-      ? applyVerification(this, campaignId, vr.target_id, vr.verdict)
-      : JSON.stringify(
-          applyFactVerdict(this, campaignId, vr.target_id, vr.verdict as "confirmed" | "refuted" | "inconclusive", vr.evidence_refs),
-        );
+    let applied: string;
+    try {
+      applied = findingRow
+        ? String(applyVerification(this, campaignId, vr.target_id, vr.verdict, vr.evidence_refs))
+        : JSON.stringify(
+            applyFactVerdict(this, campaignId, vr.target_id, vr.verdict as "confirmed" | "refuted" | "inconclusive", vr.evidence_refs),
+          );
+    } catch (err) {
+      // an illegal status transition rejects the verdict but never the finish;
+      // genuine storage faults still propagate
+      if (err instanceof DomainError && err.code === "illegal_transition") {
+        reject("illegal_transition");
+        return;
+      }
+      throw err;
+    }
     this.appendEvent(
       campaignId,
       "verification.applied",

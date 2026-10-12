@@ -59,13 +59,14 @@ function claimVerifyRun(
   campaignId: string,
   targetId: string,
   decideRunId: string,
+  method = "reproduce",
 ): { step_id: string; run_id: string; fence: number } {
   e.storage.applyProposalBatch({
     campaign_id: campaignId,
     producer_id: decideRunId,
-    submission_id: `ver-${targetId}`,
+    submission_id: `ver-${targetId}-${method}`,
     run_id: decideRunId,
-    operations: [{ op: "request_verification", finding_or_fact_id: targetId, method: "reproduce" }],
+    operations: [{ op: "request_verification", finding_or_fact_id: targetId, method }],
   });
   e.storage.finishRun(campaignId, decideRunId, decideOutcome(decideRunId));
   const run = e.storage.claimNextStep(campaignId, "t", 1)!;
@@ -463,5 +464,57 @@ test("R01-08: a model verdict never substitutes for external flag acceptance", (
   const rejected = e.storage.list("events", "r01e").filter((ev) => ev.type === "verification.rejected");
   assert.equal(rejected.length, 1);
   assert.match(String(rejected[0]!.payload_json), /goal_external_acceptance/);
+  e.close();
+});
+
+// --- C0 boundary: F01/F02 ---
+
+test("F01: a refuted verdict on a confirmed finding is rejected, the run still settles", () => {
+  const e = boot("f01");
+  const decide = e.storage.claimDecide("f01", "t")!;
+  const findingId = seedFinding(e, "f01", decide.run_id, "already confirmed", "f01-a");
+  // legally confirm it first
+  const v1 = claimVerifyRun(e, "f01", findingId, decide.run_id);
+  const fresh1 = seedEvidence(e, "f01", v1.run_id);
+  finishVerify(e, "f01", v1, {
+    disposition: "resolved",
+    summary: "confirmed",
+    evidence_refs: [fresh1],
+    verification_result: { target_id: findingId, verdict: "confirmed", evidence_refs: [fresh1], rationale: "reproduced" },
+  });
+  assert.equal(findingStatus(e, "f01", findingId), "confirmed");
+
+  // now a refuted verdict arrives; confirmed → refuted is not a legal transition
+  const decide2 = e.storage.claimDecide("f01", "t")!;
+  const v2 = claimVerifyRun(e, "f01", findingId, decide2.run_id, "re-verify");
+  const fresh2 = seedEvidence(e, "f01", v2.run_id);
+  finishVerify(e, "f01", v2, {
+    disposition: "resolved",
+    summary: "disagree",
+    evidence_refs: [fresh2],
+    verification_result: { target_id: findingId, verdict: "refuted", evidence_refs: [fresh2], rationale: "cannot reproduce" },
+  });
+  assert.equal(findingStatus(e, "f01", findingId), "confirmed", "state survives the illegal transition");
+  assert.equal(e.storage.getRun(v2.run_id).state, "finished", "the run still settles");
+  const rejected = e.storage.list("events", "f01").filter((ev) => ev.type === "verification.rejected");
+  assert.ok(rejected.some((ev) => String(ev.payload_json).includes("illegal_transition")));
+  e.close();
+});
+
+test("F02: a confirmed finding persists its verification evidence refs", () => {
+  const e = boot("f02");
+  const decide = e.storage.claimDecide("f02", "t")!;
+  const findingId = seedFinding(e, "f02", decide.run_id, "claim", "f02-a");
+  const run = claimVerifyRun(e, "f02", findingId, decide.run_id);
+  const fresh = seedEvidence(e, "f02", run.run_id);
+  finishVerify(e, "f02", run, {
+    disposition: "resolved",
+    summary: "confirmed",
+    evidence_refs: [fresh],
+    verification_result: { target_id: findingId, verdict: "confirmed", evidence_refs: [fresh], rationale: "reproduced" },
+  });
+  const row = e.storage.list("findings", "f02").find((f) => f.id === findingId)!;
+  const verificationRefs = JSON.parse(String(row.verification_refs_json)) as string[];
+  assert.deepEqual(verificationRefs, [fresh], "verification evidence lands on the finding, not only in events");
   e.close();
 });

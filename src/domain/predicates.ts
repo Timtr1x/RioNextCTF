@@ -28,3 +28,23 @@ export function evalAny(values: TriValue[]): TriValue {
 export function unknownNeverAdmits(value: TriValue): boolean {
   return value === "true";
 }
+
+/** Collect fact references from a PredicateExpr: atom.fact_id → ids, atom.key → keys, recursing all/any. */
+export function collectFactRefs(expr: unknown): { ids: string[]; keys: string[] } {
+  const ids: string[] = [];
+  const keys: string[] = [];
+  const walk = (e: unknown): void => {
+    if (!e || typeof e !== "object") return;
+    const x = e as { op?: unknown; fact_id?: unknown; key?: unknown; of?: unknown };
+    if (x.op === "atom") {
+      if (typeof x.fact_id === "string" && x.fact_id) ids.push(x.fact_id);
+      if (typeof x.key === "string" && x.key) keys.push(x.key);
+      return;
+    }
+    if ((x.op === "all" || x.op === "any") && Array.isArray(x.of)) {
+      for (const sub of x.of) walk(sub);
+    }
+  };
+  walk(expr);
+  return { ids: [...new Set(ids)], keys: [...new Set(keys)] };
+}
