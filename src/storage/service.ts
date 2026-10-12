@@ -1046,6 +1046,8 @@ export class StorageService {
     branch_id?: string;
     input_refs?: { id: string; revision: number }[];
     priority?: number;
+    /** Resource declarations used by the claim-time conflict check. */
+    resource_claims?: { key: string; mode: "shared" | "exclusive" }[];
     /** Internal: Decide-applied plan steps pass false; the batch is the review. */
     request_review?: boolean;
     retry_reason?: string;
@@ -1095,7 +1097,7 @@ export class StorageService {
       this.store.db
         .prepare(
           `INSERT INTO steps(id, campaign_id, schema_version, revision, created_at, created_seq, updated_seq, source_run_id, source_submission_id, branch_id, kind, question, goal_refs_json, input_refs_json, preconditions_json, method_family, expected_observations_json, completion_criteria, resource_claims_json, budget_hint_json, fingerprint, reopen_rule_json, status, priority, ready_since, attempt_count, retry_reason, blocked_reason)
-           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '{}', ?, ?, ?, ?, ?, 0, ?, ?)`,
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, 0, ?, ?)`,
         )
         .run(
           id,
@@ -1115,6 +1117,7 @@ export class StorageService {
           args.method_family,
           asJson(args.expected_observations),
           args.completion_criteria,
+          asJson(args.resource_claims ?? []),
           args.fingerprint,
           asJson(args.reopen_rule),
           status,
@@ -1213,6 +1216,41 @@ export class StorageService {
       .run(newId("dec"), campaignId, runId, reason, nowIso());
   }
 
+  /** True when the candidate's resource claims conflict with a running step's. */
+  private resourceConflicts(campaignId: string, candidateStepId: string, candidateClaimsJson: string): boolean {
+    let cand: { key?: unknown; mode?: unknown }[] = [];
+    try {
+      const v = JSON.parse(candidateClaimsJson) as unknown;
+      if (Array.isArray(v)) cand = v;
+    } catch {
+      cand = [];
+    }
+    if (cand.length === 0) return false;
+    const running = this.store.db
+      .prepare(
+        `SELECT s.id, s.resource_claims_json FROM steps s
+         JOIN task_runs tr ON tr.id = s.active_run_id
+         WHERE s.campaign_id = ? AND tr.state IN ('claimed','running')`,
+      )
+      .all(campaignId) as { id: string; resource_claims_json: string }[];
+    for (const row of running) {
+      if (row.id === candidateStepId) continue;
+      let other: { key?: unknown; mode?: unknown }[] = [];
+      try {
+        const v = JSON.parse(row.resource_claims_json || "[]") as unknown;
+        if (Array.isArray(v)) other = v;
+      } catch {
+        other = [];
+      }
+      for (const c of cand) {
+        for (const o of other) {
+          if (typeof c.key === "string" && c.key === o.key && (c.mode === "exclusive" || o.mode === "exclusive")) return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /**
    * Claim one ready step with a fresh run. Admission authority is the live run
    * set (claimed/running, not yet expired) capped by the campaign's
@@ -1237,20 +1275,27 @@ export class StorageService {
       );
       if (live >= maxWorkers) return null;
       this.recomputeStepReadiness(campaignId);
-      const fairId = pickFairReadyStep(this, campaignId);
-      const step = fairId
-        ? (this.store.db
-            .prepare("SELECT id, kind, question, attempt_count, revision FROM steps WHERE id = ?")
-            .get(fairId) as { id: string; kind: StepKind; question: string; attempt_count: number; revision: number } | undefined)
-        : (this.store.db
-            .prepare(
-              `SELECT id, kind, question, attempt_count, revision FROM steps
-           WHERE campaign_id = ? AND status = 'ready'
-           ORDER BY CASE kind WHEN 'verify' THEN 0 WHEN 'reconcile' THEN 1 WHEN 'acquire_prerequisite' THEN 2 ELSE 3 END,
-                    priority ASC, ready_since ASC
-           LIMIT 1`,
-            )
-            .get(campaignId) as { id: string; kind: StepKind; question: string; attempt_count: number; revision: number } | undefined);
+      // Skip steps whose declared resources conflict with a running step's.
+      // First version: exclusive beats anything on the same key; shared+shared
+      // is fine. The claim CAS below stays the concurrency authority.
+      const skip = new Set<string>();
+      let step: { id: string; kind: StepKind; question: string; attempt_count: number; revision: number } | undefined;
+      for (let tries = 0; tries < 16; tries++) {
+        const fairId = pickFairReadyStep(this, campaignId, skip);
+        if (!fairId) break;
+        const candidate = this.store.db
+          .prepare("SELECT id, kind, question, attempt_count, revision, resource_claims_json FROM steps WHERE id = ?")
+          .get(fairId) as
+          | { id: string; kind: StepKind; question: string; attempt_count: number; revision: number; resource_claims_json: string }
+          | undefined;
+        if (!candidate) break;
+        if (this.resourceConflicts(campaignId, candidate.id, candidate.resource_claims_json)) {
+          skip.add(candidate.id);
+          continue;
+        }
+        step = candidate;
+        break;
+      }
       if (!step) return null;
       transitionStep("ready", "leased");
       const now = nowIso();

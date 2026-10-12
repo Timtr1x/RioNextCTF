@@ -13,6 +13,8 @@ export interface RuntimeConfig {
   max_concurrent_decide_per_campaign: 1;
   /** Host-level cap on simultaneously active execute runs this process drives. */
   max_concurrent_execute: number;
+  /** Host-level cap on in-flight provider streams (contest slots x workers). */
+  max_inflight_model_calls: number;
   pi_tool_execution: "sequential";
   max_decide_turns: number;
   max_execute_turns_per_run: number;
@@ -35,6 +37,7 @@ export interface RuntimeConfig {
 export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "artifact_root" | "instance_id"> = {
   max_concurrent_decide_per_campaign: 1,
   max_concurrent_execute: 1,
+  max_inflight_model_calls: 8,
   pi_tool_execution: "sequential",
   max_decide_turns: 18,
   max_execute_turns_per_run: 72,

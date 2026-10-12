@@ -201,6 +201,20 @@ export class DispatchGate {
       const id = String(row.id);
       const state = String(row.state) as InvocationState;
       const reserved = Number(row.reserved_calls ?? 0);
+      if (String(row.kind) === "model") {
+        // Model invocations belong to the worker's stream lifecycle, not the
+        // adapter. Only reconcile orphans whose run already settled; a live
+        // run's in-flight stream is none of recover's business.
+        const run = row.run_id
+          ? (this.storage.store.db.prepare("SELECT state FROM task_runs WHERE id = ?").get(String(row.run_id)) as
+              | { state: string }
+              | undefined)
+          : undefined;
+        if (!run || (String(run.state) !== "claimed" && String(run.state) !== "running")) {
+          this.invocations.mark(id, "failed_known", { error: "run_settled" });
+        }
+        continue;
+      }
       if (state === "prepared") {
         this.invocations.mark(id, "failed_known", { error: "never_sent" });
         this.budget.releasePrepared(campaignId, id, reserved, Number(row.reserved_tokens ?? 0), Number(row.reserved_cost ?? 0));

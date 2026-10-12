@@ -1,12 +1,13 @@
 import type { StorageService } from "../storage/service.ts";
 
-export function pickFairReadyStep(storage: StorageService, campaignId: string): string | null {
+export function pickFairReadyStep(storage: StorageService, campaignId: string, exclude?: ReadonlySet<string>): string | null {
   const steps = storage.store.db
     .prepare(
       `SELECT id, branch_id, kind, priority, ready_since, last_served_at FROM steps
        WHERE campaign_id = ? AND status = 'ready'`,
     )
-    .all(campaignId) as {
+    .all(campaignId)
+    .filter((s) => !(exclude?.has(String((s as { id?: unknown }).id)) ?? false)) as {
     id: string;
     branch_id: string;
     kind: string;

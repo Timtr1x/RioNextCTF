@@ -8,6 +8,7 @@ import { evaluateCompletion, completeCoverageRequired, confirmedFindingsRequired
 import { DomainError } from "../domain/errors.ts";
 import type { CampaignSpec, CampaignState, RunLease, TaskOutcome } from "../domain/types.ts";
 import { decideChooser, executeChooser } from "../eval/demo-policy.ts";
+import { Semaphore } from "../gateway/semaphore.ts";
 import { commitCompletion, enterClosing } from "./close.ts";
 import { BudgetLedger } from "../gateway/budget-ledger.ts";
 import { DispatchGate } from "../gateway/dispatch.ts";
@@ -57,6 +58,10 @@ export class Engine {
   readonly kali: KaliRuntime;
   readonly logs: string[] = [];
   lastWorker: PiWorker | null = null;
+  /** Live workers this process drives, by run id. Cancel/close abort them all. */
+  private readonly activeWorkers = new Map<string, PiWorker>();
+  /** Shared provider concurrency cap across all runs (and contest siblings). */
+  private readonly modelSem: Semaphore;
   modelSends = 0;
   toolSends = 0;
   envSends = 0;
@@ -68,6 +73,7 @@ export class Engine {
     private readonly options: EngineOptions = {},
   ) {
     this.config = configIn;
+    this.modelSem = new Semaphore(configIn.max_inflight_model_calls);
     this.liveSessionId = configIn.instance_id;
     mkdirSync(configIn.artifact_root, { recursive: true });
     const store = new Store(configIn.db_path);
@@ -97,7 +103,7 @@ export class Engine {
           live?.modelName ?? "scripted",
           live?.providerId ?? "scripted",
           live?.reserveTokens ?? 16,
-          { finalizeMaxTokens: this.config.finalization.max_output_tokens },
+          { finalizeMaxTokens: this.config.finalization.max_output_tokens, semaphore: this.modelSem },
         ),
       toolGatewayFor: (lease) =>
         new ToolGateway(this.storage, this.budget, this.invocations, lease, this.dispatchGate, this.config.max_tool_calls_per_run),
@@ -187,6 +193,15 @@ export class Engine {
 
   cancel(campaignId: string): number {
     const epoch = this.storage.persistCancel(campaignId, { kind: "user", id: "cli" });
+    for (const [runId, worker] of this.activeWorkers) {
+      if (runId && this.storage.getRun(runId).campaign_id === campaignId) {
+        try {
+          worker.abort();
+        } catch {
+          // already stopped
+        }
+      }
+    }
     this.kali.kill(campaignId);
     this.storage.releaseCampaignResourceLocks(campaignId);
     this.log(`cancelled campaign ${campaignId} cancel_epoch=${epoch}; campaign container stopped; packets already sent are not retracted`);
@@ -427,13 +442,13 @@ export class Engine {
         // A commit advances reviewed_seq (to H); then the persisted seqs decide
         // what happens next, so inputs that arrived mid-run are never swallowed.
         const requestWatermark = camp.requested_seq;
-        const reviewedBefore = camp.reviewed_seq;
         const decided = await this.runDecide(campaignId);
         ranDecide = Boolean(decided);
         lastDecideResolved = decided?.reason === "resolved";
-        const after = this.storage.getCampaign(campaignId);
-        const advanced = after.reviewed_seq > reviewedBefore || after.reviewed_seq >= after.requested_seq;
-        decideAttemptedFor = advanced ? -1 : requestWatermark;
+        // The dedupe marker is always the pre-run request watermark R: a commit
+        // already advanced reviewed_seq (to H), and a later input D > R still
+        // re-enables review. Failure never retries the same R immediately.
+        decideAttemptedFor = requestWatermark;
       }
       const afterDecide = this.storage.getCampaign(campaignId);
       if (afterDecide.state === "cancelled") break;
@@ -595,6 +610,7 @@ export class Engine {
   async runWorker(lease: RunLease): Promise<TaskOutcome> {
     const worker = this.factory.create(lease.mode, lease.run_id) as unknown as PiWorker;
     this.lastWorker = worker;
+    this.activeWorkers.set(lease.run_id, worker);
     // Keep the short run lease alive while this process is actually working.
     // If the process dies the renewals stop, and recoverStaleRuns reclaims the
     // run within ~run_lease_ms instead of the full controller-lock TTL.
@@ -621,6 +637,7 @@ export class Engine {
       return outcome;
     } finally {
       clearInterval(heartbeat);
+      this.activeWorkers.delete(lease.run_id);
     }
   }
 
@@ -795,6 +812,14 @@ export class Engine {
   }
 
   close(): void {
+    for (const worker of this.activeWorkers.values()) {
+      try {
+        worker.abort();
+      } catch {
+        // already stopped
+      }
+    }
+    this.activeWorkers.clear();
     try {
       this.storage.releaseAllControllerLocks(this.config.instance_id);
     } catch {

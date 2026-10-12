@@ -112,3 +112,61 @@ test("execution_policy validates and round-trips", () => {
   cfg.max_concurrent_execute = 0;
   assert.throws(() => validateStartupInput(JSON.parse(JSON.stringify(spec)), cfg));
 });
+
+test("M12: an exclusive resource claim skips to a non-conflicting step", () => {
+  const e = boot("cap-res", 2);
+  const root = String(e.storage.list("goals", "cap-res")[0]!.id);
+  const mk = (i: number, claims: { key: string; mode: string }[]): void => {
+    e.storage.proposeStepDirect({
+      campaign_id: "cap-res",
+      producer_id: "t",
+      submission_id: `res-${i}`,
+      question: `res ${i}`,
+      kind: "explore",
+      goal_refs: [root],
+      preconditions: { op: "all", of: [] },
+      method_family: "generic",
+      expected_observations: [],
+      completion_criteria: "done",
+      fingerprint: `res-fp-${i}`,
+      reopen_rule: { kind: "always" },
+      resource_claims: claims as never,
+    });
+  };
+  // step 0 wants the listener exclusively; step 1 shares nothing
+  mk(0, [{ key: "listener:8080", mode: "exclusive" }]);
+  mk(1, []);
+  const a = e.storage.claimNextStep("cap-res", "w1", 1)!;
+  assert.equal(String(e.storage.list("steps", "cap-res").find((s) => s.id === a.step_id)!.fingerprint), "res-fp-0");
+  // step 0 runs; a second claim must not grab step 1's... wait, step 1 is free
+  const b = e.storage.claimNextStep("cap-res", "w2", 1)!;
+  assert.equal(String(e.storage.list("steps", "cap-res").find((s) => s.id === b.step_id)!.fingerprint), "res-fp-1");
+  e.close();
+});
+
+test("M12b: a conflicting exclusive claim waits instead of double-booking", () => {
+  const e = boot("cap-res2", 2);
+  const root = String(e.storage.list("goals", "cap-res2")[0]!.id);
+  for (let i = 0; i < 2; i++) {
+    e.storage.proposeStepDirect({
+      campaign_id: "cap-res2",
+      producer_id: "t",
+      submission_id: `res2-${i}`,
+      question: `res2 ${i}`,
+      kind: "explore",
+      goal_refs: [root],
+      preconditions: { op: "all", of: [] },
+      method_family: "generic",
+      expected_observations: [],
+      completion_criteria: "done",
+      fingerprint: `res2-fp-${i}`,
+      reopen_rule: { kind: "always" },
+      resource_claims: [{ key: "listener:8080", mode: "exclusive" }] as never,
+    });
+  }
+  const a = e.storage.claimNextStep("cap-res2", "w1", 1)!;
+  const b = e.storage.claimNextStep("cap-res2", "w2", 1);
+  assert.equal(b, null, "the second exclusive claim on the same resource waits");
+  void a;
+  e.close();
+});

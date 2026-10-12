@@ -7,6 +7,7 @@ import { createScriptedErrorStream } from "../runtime/pi/scripted-stream.ts";
 import type { StorageService } from "../storage/service.ts";
 import { BudgetLedger } from "./budget-ledger.ts";
 import { runWithOuterDeadline } from "./deadline.ts";
+import type { Semaphore } from "./semaphore.ts";
 import type { DispatchGate } from "./dispatch.ts";
 import { InvocationBook } from "./invocation.ts";
 import { assertSafeToolPath, isPolicyInjectionText } from "./sandbox.ts";
@@ -95,18 +96,61 @@ export class ModelGateway {
     private readonly modelId: string,
     private readonly providerName = "scripted",
     private readonly reserveTokens = 16,
-    extra: { finalizeMaxTokens?: number } = {},
+    extra: { finalizeMaxTokens?: number; semaphore?: Semaphore } = {},
   ) {
     this.finalizeMaxTokens = Math.max(1, extra.finalizeMaxTokens ?? 12800);
+    this.sem = extra.semaphore ?? null;
   }
+
+  private readonly sem: Semaphore | null;
 
   closeAdmission(): void {
     this.closed = true;
   }
 
+
   setPhase(phase: "primary" | "finalizing"): void {
     this.phase = phase;
   }
+
+  /** Acquire a provider slot, run the stream, release on settle. */
+  private gatedStream(
+    callModel: Model<string>,
+    context: Context,
+    callOpts: unknown,
+    inv: { id: string; reserved_calls: number; reserved_tokens: number; reserved_cost: number },
+    reserveTokens: number,
+  ): Promise<AssistantMessageEventStream> {
+    const sem = this.sem!;
+    return (async () => {
+      await sem.acquire();
+      let released = false;
+      const release = (): void => {
+        if (!released) {
+          released = true;
+          sem.release();
+        }
+      };
+      try {
+        const stream = await this.inner(callModel, context, callOpts as never);
+        if (stream && typeof (stream as { result?: unknown }).result === "function") {
+          const orig = (stream as AssistantMessageEventStream).result.bind(stream as AssistantMessageEventStream);
+          (stream as unknown as { result: () => Promise<unknown> }).result = async () => {
+            try {
+              return await orig();
+            } finally {
+              release();
+            }
+          };
+        }
+        return stream as AssistantMessageEventStream;
+      } catch (err) {
+        release();
+        throw err;
+      }
+    })();
+  }
+
 
   finalizeReserveTokens(): number {
     return this.finalizeMaxTokens;
@@ -168,6 +212,11 @@ export class ModelGateway {
         maxTokens: reserveTokens,
         reasoning: finalizing ? ("low" as const) : options?.reasoning,
       };
+      // Provider concurrency cap: the stream waits for a free slot before the
+      // provider call starts; the slot frees when the stream settles.
+      if (this.sem) {
+        return this.gatedStream(callModel, context, callOpts, inv, reserveTokens);
+      }
       const stream = this.inner(callModel, context, callOpts);
       return wrapSettle(stream, (msg) => {
         const tokens = Number(msg.usage?.totalTokens ?? reserveTokens);
