@@ -31,3 +31,24 @@
 ## 回滚
 
 各提交独立；回滚到 1e55968 即回到单 Worker。execution_policy 缺省 1 的旧 spec 行为不变。
+
+## 复核与修复记录（2026-10-13）
+
+两名独立复核者（缺陷优先 + 并发专项）复审 C0–C7 diff 后确认的头部问题及处置：
+
+| 发现 | 级别 | 修复 |
+| --- | --- | --- |
+| gatedStream 绕过 wrapSettle，模型调用预算永不结算（缺省路径必中） | P0 | 门控只负责拿/放槽，stream 照常过 wrapSettle；预算结算、invocation 终结有测试钉住 |
+| recover 每 2s 把在途 dispatch 误判 uncertain + liability | P0 | recover 收到本进程正在驱动的 run 的调用一律跳过；孤儿 model invocation 结算预算 |
+| abort 信号到不了 docker 进程 | P1 | AbortSignal 端到端接通（gateway 合并 worker abort 与外层 deadline） |
+| F03 覆盖声明在生产工具面不可满足 | P1 | propose_step 加 input_refs，端到端证明 assessment 可声明义务 |
+| Worker 路径残留同步长调用（DNS/目录遍历/轮询 spawnSync） | P1 | defaultResolveAsync、admitExecAsync、workspaceBytesAsync、recoverAsync |
+| permit 不查 run.state | P2 | claimed/running 之外的 run 拒绝 dispatch（run_not_live） |
+| 信号量排队不看截止；release 只靠 result() | P2 | 排队 race 租约剩余时间 |
+| pw session 泄漏、截图路径在共享容器下放错 | P2 | close op + 结算时 fire-and-forget close；run_dir 注入 |
+| max_inflight_model_calls 无校验 | P3 | validateStartupInput 校验 |
+| runDecide 裸 await 被打穿 | P3 | try/catch + failDecision 记录 |
+| engine-host/contest 各自 Semaphore 名不副实 | P3 | 全局共享 Semaphore |
+| 非 env 工具 prepare+reserve 非单事务 | P3 | 包入一个事务 |
+
+修复后：npm test 430 通过 / 0 失败 / 2 跳过；npm run build 通过。复核者确认排除的项（claim CAS、per-run 键、finishRun CAS）未再列入。
