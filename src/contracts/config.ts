@@ -121,6 +121,9 @@ export function validateStartupInput(spec: unknown, runtime: RuntimeConfig): Cam
   if (!Number.isInteger(runtime.max_concurrent_execute) || runtime.max_concurrent_execute < 1) {
     throw invalidInput("execute_slot", "max_concurrent_execute must be an integer >= 1");
   }
+  if (!Number.isInteger(runtime.max_inflight_model_calls) || runtime.max_inflight_model_calls < 1) {
+    throw invalidInput("inflight_model_calls", "max_inflight_model_calls must be an integer >= 1");
+  }
   if (runtime.automatic_model_fallback) {
     throw invalidInput("model_fallback", "automatic model fallback is disabled");
   }

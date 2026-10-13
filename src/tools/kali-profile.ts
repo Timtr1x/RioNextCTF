@@ -343,6 +343,7 @@ export const PLAYWRIGHT_OPS = new Set([
   "wait",
   "back",
   "status",
+  "close",
 ]);
 
 export const DEFAULT_KALI_LIMITS = {

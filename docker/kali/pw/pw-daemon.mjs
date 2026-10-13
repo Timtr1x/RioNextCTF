@@ -115,7 +115,9 @@ async function handle(cmd) {
       return { url: p.url(), title: await p.title(), text: text.slice(0, 8000) };
     }
     case "screenshot": {
-      const dir = `/workspace/runs/${sessionId}`;
+      // the controller passes its container-side run dir so the file lands next
+      // to the run's own work; fall back to the session root
+      const dir = String(cmd.run_dir ?? `/workspace/runs/${sessionId}`).replace(/\+/g, "/");
       mkdirSync(dir, { recursive: true });
       const path = `${dir}/pw-last.png`;
       const buf = await p.screenshot({ fullPage: false });

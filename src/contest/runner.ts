@@ -8,6 +8,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Engine, openEngine } from "../controller/engine.ts";
 import { invalidInput } from "../domain/errors.ts";
+import { Semaphore } from "../gateway/semaphore.ts";
 import { seedChallengeStep, specFromInput, specFromUrl, type LoadedRun } from "../cli/run-spec.ts";
 import { fetchAttachment } from "../domain/attachment-fetch.ts";
 import type { ContestQuestion, FetchLike } from "./api.ts";
@@ -164,6 +165,8 @@ class EngineCampaignHandle implements CampaignHandle {
 
 export class EngineRunnerFactory implements RunnerFactory {
   private controlEngine: Engine | null = null;
+  /** One provider cap across all slot engines (slots x workers). */
+  private readonly modelSemaphore = new Semaphore(8);
 
   constructor(
     readonly contestDir: string,
@@ -176,7 +179,7 @@ export class EngineRunnerFactory implements RunnerFactory {
 
   private controlEngineGet(): Engine {
     if (!this.controlEngine) {
-      this.controlEngine = openEngine(this.contestDir, { silent: true, maxCycles: this.opts.maxCycles ?? 1000 });
+      this.controlEngine = openEngine(this.contestDir, { silent: true, maxCycles: this.opts.maxCycles ?? 1000, modelSemaphore: this.modelSemaphore });
     }
     return this.controlEngine;
   }
@@ -219,6 +222,7 @@ export class EngineRunnerFactory implements RunnerFactory {
       silent: true,
       maxCycles: this.opts.maxCycles ?? 1000,
       kaliShared: this.opts.shared,
+      modelSemaphore: this.modelSemaphore,
     });
     return new EngineCampaignHandle(engine, campaignId, this.contestDir, Boolean(this.opts.shared));
   }

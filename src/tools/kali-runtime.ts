@@ -598,7 +598,7 @@ export class KaliRuntime {
     }
     const spec = await this.ensureAsync(opts, signal);
     const result = await this.docker.runAsync(["exec", "-i", spec.name, "node", "/opt/rionext/pw-ctl.mjs"], {
-      input: JSON.stringify(opts.runId ? { ...cmd, session_id: opts.runId } : cmd),
+      input: JSON.stringify(opts.runId ? { ...cmd, session_id: opts.runId, run_dir: runRootOf(opts) } : cmd),
       timeoutMs: Math.max(DEFAULT_KALI_LIMITS.maxRuntimeMs, cmd.timeout_ms ?? 0) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
       signal,
@@ -818,7 +818,7 @@ export class KaliRuntime {
     }
     const spec = this.ensure(opts);
     const result = this.docker.run(["exec", "-i", spec.name, "node", "/opt/rionext/pw-ctl.mjs"], {
-      input: JSON.stringify(opts.runId ? { ...cmd, session_id: opts.runId } : cmd),
+      input: JSON.stringify(opts.runId ? { ...cmd, session_id: opts.runId, run_dir: runRootOf(opts) } : cmd),
       timeoutMs: Math.max(DEFAULT_KALI_LIMITS.maxRuntimeMs, cmd.timeout_ms ?? 0) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
     });
@@ -828,6 +828,23 @@ export class KaliRuntime {
     const out = { ...result, truncated, container: spec.name };
     this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
+  }
+
+  /** Fire-and-forget browser session cleanup for a finished run. Never throws. */
+  closePlaywrightSession(opts: KaliStartOpts): void {
+    if (!opts.runId) return;
+    try {
+      void this.docker
+        .runAsync(["exec", "-i", opts.shared?.name ?? containerName(opts.campaignId), "node", "/opt/rionext/pw-ctl.mjs"], {
+          input: JSON.stringify({ op: "close", session_id: opts.runId }),
+          timeoutMs: 8_000,
+        })
+        .catch(() => {
+          // daemon down or container gone: the session dies with them anyway
+        });
+    } catch {
+      // best effort only
+    }
   }
 
   kill(campaignId: string): void {

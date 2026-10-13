@@ -42,6 +42,8 @@ export interface EngineOptions {
   effectAdapter?: EffectAdapter;
   dockerCli?: DockerCli;
   kaliResolve?: ResolveFn;
+  /** Share one provider cap across engines in this process (web/contest hosts). */
+  modelSemaphore?: Semaphore;
   /** Contest mode: all campaigns of this engine share one Kali container
    *  (mounts the workspace parent; per-campaign container root /workspace/<id>). */
   kaliShared?: { name: string; mountHost: string };
@@ -73,7 +75,7 @@ export class Engine {
     private readonly options: EngineOptions = {},
   ) {
     this.config = configIn;
-    this.modelSem = new Semaphore(configIn.max_inflight_model_calls);
+    this.modelSem = options.modelSemaphore ?? new Semaphore(configIn.max_inflight_model_calls);
     this.liveSessionId = configIn.instance_id;
     mkdirSync(configIn.artifact_root, { recursive: true });
     const store = new Store(configIn.db_path);
@@ -242,6 +244,10 @@ export class Engine {
   private kaliOptsForInvocation(invocationId: string): KaliStartOpts {
     const inv = this.invocations.get(invocationId);
     return this.kaliOpts(String(inv.campaign_id), String(inv.run_id ?? "") || undefined);
+  }
+
+  private kaliOptsForRun(lease: { campaign_id: string; run_id: string }): KaliStartOpts {
+    return this.kaliOpts(lease.campaign_id, lease.run_id);
   }
 
   pause(campaignId: string): void {
@@ -442,7 +448,15 @@ export class Engine {
         // A commit advances reviewed_seq (to H); then the persisted seqs decide
         // what happens next, so inputs that arrived mid-run are never swallowed.
         const requestWatermark = camp.requested_seq;
-        const decided = await this.runDecide(campaignId);
+        let decided: Awaited<ReturnType<typeof this.runDecide>> = null;
+        try {
+          decided = await this.runDecide(campaignId);
+        } catch (err) {
+          // A worker-level failure must not tear down the loop; the decide lock
+          // release path (recoverStaleRuns) reclaims within ~run_lease_ms.
+          this.log(`runDecide failed: ${err instanceof Error ? err.message : String(err)}`);
+          this.storage.failDecision(campaignId, "unknown", `engine_error:${err instanceof Error ? err.message : String(err)}`);
+        }
         ranDecide = Boolean(decided);
         lastDecideResolved = decided?.reason === "resolved";
         // The dedupe marker is always the pre-run request watermark R: a commit
@@ -629,6 +643,7 @@ export class Engine {
       await worker.start(lease, ctx, ctrl.signal);
       const outcome = await worker.settle();
       this.storage.finishRun(lease.campaign_id, lease.run_id, outcome);
+      this.kali.closePlaywrightSession(this.kaliOptsForRun(lease));
       if (worker.modelGateway) this.modelSends += worker.modelGateway.modelSends;
       if (worker.toolGateway) {
         this.toolSends += worker.toolGateway.toolSends;

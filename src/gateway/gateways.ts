@@ -117,7 +117,13 @@ export class ModelGateway {
   private gatedStream(callModel: Model<string>, context: Context, callOpts: unknown): Promise<AssistantMessageEventStream> {
     const sem = this.sem!;
     return (async () => {
-      await sem.acquire();
+      // A queued worker must not wake up past its lease and still call the provider.
+      const remaining = Math.max(1, this.lease.deadline_ms - Date.now());
+      const won = await Promise.race([
+        sem.acquire().then(() => "slot" as const),
+        new Promise<"expired">((r) => setTimeout(() => r("expired"), remaining)),
+      ]);
+      if (won === "expired") return createScriptedErrorStream(callModel, "lease_expired");
       let released = false;
       const release = (): void => {
         if (!released) {
@@ -349,18 +355,22 @@ export class ToolGateway {
     if (!this.budget.canAdmit(this.lease.campaign_id, 1, 0, 0)) {
       throw new DomainError("budget_exhausted", "tool call exceeds root cap", "budget");
     }
-    const inv = this.invocations.prepare({
-      campaign_id: this.lease.campaign_id,
-      run_id: this.lease.run_id,
-      kind: "tool",
-      purpose: req.name,
-      fence: this.lease.fence,
-      cancel_epoch: this.lease.cancel_epoch,
-      effect_class: req.effect,
-      reserved_calls: 1,
+    // prepare+reserve must land together or not at all
+    const inv = this.storage.store.transaction(() => {
+      const i = this.invocations.prepare({
+        campaign_id: this.lease.campaign_id,
+        run_id: this.lease.run_id,
+        kind: "tool",
+        purpose: req.name,
+        fence: this.lease.fence,
+        cancel_epoch: this.lease.cancel_epoch,
+        effect_class: req.effect,
+        reserved_calls: 1,
+      });
+      this.budget.reserve(this.lease.campaign_id, i.id, 1, 0, 0);
+      this.invocations.mark(i.id, "dispatching");
+      return i;
     });
-    this.budget.reserve(this.lease.campaign_id, inv.id, 1, 0, 0);
-    this.invocations.mark(inv.id, "dispatching");
     this.invocations.mark(inv.id, "running");
     this.toolSends += 1;
     this.invocations.mark(inv.id, "completed");

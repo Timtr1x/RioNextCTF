@@ -96,6 +96,10 @@ export class DispatchGate {
         return { ok: false as const, reason: "admission_closed", invocation_id: "none" };
       }
       const run = this.storage.getRun(req.lease.run_id);
+      if (String(run.state) !== "claimed" && String(run.state) !== "running") {
+        // A run reclaimed or settled elsewhere must not emit more side effects.
+        return { ok: false as const, reason: "run_not_live", invocation_id: "none" };
+      }
       if (Number(run.fence) !== req.lease.fence) {
         return { ok: false as const, reason: "stale_fence", invocation_id: "none" };
       }
