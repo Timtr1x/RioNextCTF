@@ -189,6 +189,7 @@ export class DispatchGate {
   recover(
     campaignId: string,
     invocationId?: string,
+    activeRunIds?: ReadonlySet<string>,
   ): { prepared_released: number; marked_uncertain: number; reconciled: number; still_running: number } {
     const rows = this.invocations
       .nonTerminal(campaignId)
@@ -212,7 +213,19 @@ export class DispatchGate {
           : undefined;
         if (!run || (String(run.state) !== "claimed" && String(run.state) !== "running")) {
           this.invocations.mark(id, "failed_known", { error: "run_settled" });
+          // An orphaned model call whose run settled without settling the
+          // stream: assume it was charged, reconcile the reserve honestly.
+          const tokens = Number(row.reserved_tokens ?? 0);
+          const cost = Number(row.reserved_cost ?? 0);
+          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+          this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
         }
+        continue;
+      }
+      // A dispatch still in flight on a run THIS process is driving is not
+      // recover's business: its owner will settle it. Crashed runs (not driven
+      // here) fall through to the normal liability/uncertain reconciliation.
+      if (row.run_id && activeRunIds?.has(String(row.run_id))) {
         continue;
       }
       if (state === "prepared") {

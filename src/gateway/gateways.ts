@@ -114,13 +114,7 @@ export class ModelGateway {
   }
 
   /** Acquire a provider slot, run the stream, release on settle. */
-  private gatedStream(
-    callModel: Model<string>,
-    context: Context,
-    callOpts: unknown,
-    inv: { id: string; reserved_calls: number; reserved_tokens: number; reserved_cost: number },
-    reserveTokens: number,
-  ): Promise<AssistantMessageEventStream> {
+  private gatedStream(callModel: Model<string>, context: Context, callOpts: unknown): Promise<AssistantMessageEventStream> {
     const sem = this.sem!;
     return (async () => {
       await sem.acquire();
@@ -213,11 +207,10 @@ export class ModelGateway {
         reasoning: finalizing ? ("low" as const) : options?.reasoning,
       };
       // Provider concurrency cap: the stream waits for a free slot before the
-      // provider call starts; the slot frees when the stream settles.
-      if (this.sem) {
-        return this.gatedStream(callModel, context, callOpts, inv, reserveTokens);
-      }
-      const stream = this.inner(callModel, context, callOpts);
+      // provider call starts; the slot frees when the stream settles. The
+      // (possibly gated) stream still flows through wrapSettle below, which is
+      // what settles the invocation and the budget reserve.
+      const stream = this.sem ? this.gatedStream(callModel, context, callOpts) : this.inner(callModel, context, callOpts);
       return wrapSettle(stream, (msg) => {
         const tokens = Number(msg.usage?.totalTokens ?? reserveTokens);
         const failed = msg.stopReason === "error" || msg.stopReason === "aborted";
