@@ -792,6 +792,11 @@ export class PiWorker implements WorkerRuntime {
           method_family: Type.Optional(Type.String()),
           fingerprint: Type.Optional(Type.String()),
           preconditions: Type.Optional(Type.Unknown()),
+          input_refs: Type.Optional(
+            Type.Array(Type.String(), {
+              description: "entity ids this step tests or verifies (e.g. a coverage obligation id); revisions are filled by the program",
+            }),
+          ),
           retry_reason: Type.Optional(Type.String()),
         }), async (_id, params) => {
           const p = params as {
@@ -800,6 +805,7 @@ export class PiWorker implements WorkerRuntime {
             method_family?: string;
             fingerprint?: string;
             preconditions?: unknown;
+            input_refs?: string[];
             retry_reason?: string;
           };
           const kind =
@@ -817,12 +823,13 @@ export class PiWorker implements WorkerRuntime {
           const root = s.store.db.prepare("SELECT id FROM goals WHERE campaign_id = ? AND is_root = 1").get(lease.campaign_id) as { id: string };
           const goalRefs = [root.id];
           const preconditions = (p.preconditions as never) ?? { op: "all", of: [] };
+          const inputRefs = (p.input_refs ?? []).map((id) => ({ id, revision: s.entityRevisionFor(lease.campaign_id, id) ?? 0 }));
           const fingerprint = s.stepFingerprintResolve(lease.campaign_id, {
             kind,
             methodFamily: family,
             question: p.question,
             goalRefs,
-            inputRefs: [],
+            inputRefs,
             preconditions,
             explicit: p.fingerprint,
           });
@@ -841,6 +848,7 @@ export class PiWorker implements WorkerRuntime {
             fingerprint,
             reopen_rule: { kind: "never" },
             retry_reason: p.retry_reason,
+            input_refs: inputRefs,
           });
           return ok(result);
         }),

@@ -1001,6 +1001,17 @@ export class StorageService {
     });
   }
 
+  /** Current revision of any entity in the campaign, or null when absent. */
+  entityRevisionFor(campaignId: string, id: string): number | null {
+    for (const table of ["goals", "steps", "facts", "findings", "coverage_items", "observations"]) {
+      const row = this.store.db.prepare(`SELECT revision FROM ${table} WHERE id = ? AND campaign_id = ?`).get(id, campaignId) as
+        | { revision: number }
+        | undefined;
+      if (row) return row.revision;
+    }
+    return null;
+  }
+
   /**
    * Fingerprint resolution for propose_step. Explicit fingerprints pass through
    * unchanged. Otherwise: if a live step still carries the legacy default

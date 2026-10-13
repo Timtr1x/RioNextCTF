@@ -310,14 +310,15 @@ export class ToolGateway {
       }
       const ms = Math.max(1, this.lease.deadline_ms - Date.now());
       try {
-        const timed = await runWithOuterDeadline(ms, () =>
+        const timed = await runWithOuterDeadline(ms, (deadlineSignal) =>
           this.dispatchGate!.dispatchAsync({
             lease: this.lease,
             purpose: req.name,
             payload: req.args,
             effect: req.effect,
             envTool: true,
-            signal: req.signal,
+            // worker abort OR the outer deadline kills just this invocation's process
+            signal: req.signal ? AbortSignal.any([req.signal, deadlineSignal]) : deadlineSignal,
           }),
         );
         if (!timed.ok || !timed.value) {

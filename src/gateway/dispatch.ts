@@ -77,7 +77,7 @@ export class DispatchGate {
       return { status: "rejected", reason: permit.reason, invocation_id: permit.invocation_id };
     }
     try {
-      const sent = await this.adapter.sendAsync(permit.invocation_id, req.payload);
+      const sent = await this.adapter.sendAsync(permit.invocation_id, req.payload, req.signal);
       return this.afterSend(req, permit.invocation_id, sent);
     } catch (err) {
       return this.sendFailed(req, permit.invocation_id, err);
@@ -186,11 +186,11 @@ export class DispatchGate {
     return r;
   }
 
-  recover(
+  async recover(
     campaignId: string,
     invocationId?: string,
     activeRunIds?: ReadonlySet<string>,
-  ): { prepared_released: number; marked_uncertain: number; reconciled: number; still_running: number } {
+  ): Promise<{ prepared_released: number; marked_uncertain: number; reconciled: number; still_running: number }> {
     const rows = this.invocations
       .nonTerminal(campaignId)
       .filter((row) => !invocationId || String(row.id) === invocationId);
@@ -237,7 +237,7 @@ export class DispatchGate {
         const cost = Number(row.reserved_cost ?? 0);
         this.budget.markLiability(campaignId, id, reserved, tokens, cost);
         const ext = row.external_id ? String(row.external_id) : null;
-        const q = ext ? this.adapter.query(ext) : "unknown";
+        const q = ext ? await (this.adapter.queryAsync ? this.adapter.queryAsync(ext) : this.adapter.query(ext)) : "unknown";
         if (ext && q === "completed") {
           this.invocations.mark(id, "reconciled");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
@@ -266,13 +266,13 @@ export class DispatchGate {
           this.budget.reconcileLiability(campaignId, `rec:${id}`, reservedCalls, reservedCalls);
           this.storage.releaseResourceLocksForInvocation(campaignId, id);
           reconciled += 1;
-        } else if (ext && this.adapter.query(ext) === "completed") {
+        } else if (ext && (await (this.adapter.queryAsync ? this.adapter.queryAsync(ext) : this.adapter.query(ext))) === "completed") {
           this.invocations.mark(id, "reconciled");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, reservedCalls, reservedCalls);
           this.storage.releaseResourceLocksForInvocation(campaignId, id);
           this.storage.updateOperationState(ext, "completed");
           reconciled += 1;
-        } else if (ext && this.adapter.query(ext) === "failed") {
+        } else if (ext && (await (this.adapter.queryAsync ? this.adapter.queryAsync(ext) : this.adapter.query(ext))) === "failed") {
           this.invocations.mark(id, "failed_known");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reservedCalls, 0, 0, 0, 0);
           this.storage.releaseResourceLocksForInvocation(campaignId, id);

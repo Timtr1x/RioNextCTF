@@ -81,7 +81,7 @@ test("a gated model call still settles budget and marks the invocation", async (
   e.close();
 });
 
-test("recover skips an in-flight tool dispatch on a live run, reconciles it when the run settled", () => {
+test("recover skips an in-flight tool dispatch on a live run, reconciles it when the run settled", async () => {
   const e = boot("rec-live");
   // seed a ready step and claim it
   const root = String(e.storage.list("goals", "rec-live")[0]!.id);
@@ -116,7 +116,7 @@ test("recover skips an in-flight tool dispatch on a live run, reconciles it when
   e.invocations.mark(inv.id, "dispatching");
 
   const before = e.budget.snapshot("rec-live");
-  const r1 = e.dispatchGate.recover("rec-live", undefined, new Set([lease.run_id]));
+  const r1 = await e.dispatchGate.recover("rec-live", undefined, new Set([lease.run_id]));
   assert.equal(r1.marked_uncertain, 0, "a live run's in-flight dispatch is left alone");
   const mid = e.budget.snapshot("rec-live");
   assert.equal(Number(mid.liability_calls ?? 0), 0, "no liability marked while the run is alive");
@@ -126,14 +126,14 @@ test("recover skips an in-flight tool dispatch on a live run, reconciles it when
   e.storage.store.db
     .prepare("UPDATE task_runs SET state = 'lease_expired', deadline_ms = 0 WHERE id = ?")
     .run(lease.run_id);
-  const r2 = e.dispatchGate.recover("rec-live");
+  const r2 = await e.dispatchGate.recover("rec-live");
   assert.ok(r2.marked_uncertain >= 1, "orphaned dispatch is marked uncertain");
   const invAfter = e.storage.store.db.prepare("SELECT state FROM invocations WHERE id = ?").get(inv.id) as { state: string };
   assert.equal(invAfter.state, "uncertain");
   e.close();
 });
 
-test("an orphaned model invocation of a settled run reconciles its budget", () => {
+test("an orphaned model invocation of a settled run reconciles its budget", async () => {
   const e = boot("rec-model");
   const run = e.storage.claimDecide("rec-model", "t")!;
   const lease = leaseFor(run, "rec-model");
@@ -155,7 +155,7 @@ test("an orphaned model invocation of a settled run reconciles its budget", () =
 
   // run settles without the stream settling
   e.storage.store.db.prepare("UPDATE task_runs SET state = 'finished' WHERE id = ?").run(lease.run_id);
-  e.dispatchGate.recover("rec-model");
+  await e.dispatchGate.recover("rec-model");
   const after = e.budget.snapshot("rec-model");
   assert.equal(Number(after.reserved_tokens), 0, "the orphan's reserve is reconciled");
   const invAfter = e.storage.store.db.prepare("SELECT state FROM invocations WHERE id = ?").get(inv.id) as { state: string };

@@ -13,6 +13,15 @@ function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rn-cov-"));
 }
 
+function toolNamesCalled(messages: unknown[]): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    const msg = m as { role?: string; toolName?: string };
+    if (msg.role === "toolResult" && typeof msg.toolName === "string") out.push(msg.toolName);
+  }
+  return out;
+}
+
 function outcome(runId: string): TaskOutcome {
   return {
     run_id: runId,
@@ -45,6 +54,7 @@ async function rig(id: string): Promise<Rig> {
   e.storage.setCampaignState(id, "active", { kind: "user", id: "t" });
   const decide = e.storage.claimDecide(id, "t")!;
   const root = String(e.storage.list("goals", id)[0]!.id);
+  const covId = String(e.storage.list("coverage_items", id).find((c) => c.obligation === "inspect-desk")!.id);
   e.storage.proposeStepDirect({
     campaign_id: id,
     producer_id: "t",
@@ -59,14 +69,9 @@ async function rig(id: string): Promise<Rig> {
     completion_criteria: "done",
     fingerprint: `${id}-fp`,
     reopen_rule: { kind: "always" },
+    input_refs: [{ id: covId, revision: e.storage.entityRevisionFor(id, covId)! }],
   });
   e.storage.finishRun(id, decide.run_id, outcome(decide.run_id));
-  const covId = String(e.storage.list("coverage_items", id).find((c) => c.obligation === "inspect-desk")!.id);
-  const covRow = e.storage.list("coverage_items", id).find((c) => c.id === covId)!;
-  e.storage.store.db.prepare("UPDATE steps SET input_refs_json = ? WHERE fingerprint = ?").run(
-    JSON.stringify([{ id: covId, revision: Number(covRow.revision ?? 1) }]),
-    `${id}-fp`,
-  );
   const claimed = e.storage.claimNextStep(id, "t", 1)!;
   return { e, covId, runId: claimed.run_id, fence: claimed.fence };
 }
@@ -254,4 +259,97 @@ test("F03: a fresh observation without the step declaring the obligation is reje
   assert.ok(rejected.some((x) => x.includes("coverage_not_declared")), JSON.stringify(rejected));
   assert.notEqual(covState(r.e, "f03", r.covId).execution_state, "tested");
   r.e.close();
+});
+
+test("F03 e2e: the model declares the obligation via propose_step input_refs, no SQL needed", async () => {
+  const dir = tmp();
+  const spec = loadAssessmentSpec("f03e2e");
+  if (!spec.tool_allowlist.includes("propose_step")) spec.tool_allowlist = [...spec.tool_allowlist, "propose_step"];
+  const covHolder: { id: string } = { id: "" };
+  const chooserFor = (e: Engine): import("../../src/runtime/pi/scripted-stream.ts").TurnChooser => {
+    return (ctx) => {
+      const first = ctx.messages[0] as { content?: { type?: string; text?: string }[] } | undefined;
+      const payload = Array.isArray(first?.content) ? String(first.content[0]?.text ?? "") : "";
+      const currentQuestion = payload.match(/"current_step":\s*\{[^}]*?"question":"([^"]+)"/)?.[1] ?? "";
+      const called = toolNamesCalled(ctx.messages);
+      if (currentQuestion === "seed work") {
+        // first run: propose the obligation test with the coverage id declared
+        if (!called.includes("propose_step")) {
+          return {
+            type: "tool_calls",
+            calls: [
+              { name: "propose_step", arguments: { question: "test the desk obligation", input_refs: [covHolder.id] } },
+            ],
+          };
+        }
+        return {
+          type: "tool_calls",
+          calls: [
+            { name: "finish_step", arguments: { disposition: "deferred", summary: "proposed", next_action: "run it", reopen_rule: { kind: "always" } } },
+          ],
+        };
+      }
+      // second run (the declared step): gather evidence, finish with the result
+      if (!called.includes("submit_observation")) {
+        return { type: "tool_calls", calls: [{ name: "submit_observation", arguments: { subject: "desk", body: { ok: true } } }] };
+      }
+      if (!called.includes("finish_step")) {
+        const obs = e.storage.list("observations", "f03e2e");
+        const last = obs[obs.length - 1]!;
+        return {
+          type: "tool_calls",
+          calls: [
+            {
+              name: "finish_step",
+              arguments: {
+                disposition: "resolved",
+                summary: "tested",
+                evidence_refs: [String(last.id)],
+                coverage_result: [{ coverage_id: covHolder.id, outcome: "no_issue_observed", evidence_refs: [String(last.id)], note: "checked" }],
+              },
+            },
+          ],
+        };
+      }
+      return { type: "text", text: "done" };
+    };
+  };
+
+  const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 10 });
+  e.createCampaign(spec);
+  covHolder.id = String(e.storage.list("coverage_items", "f03e2e").find((c) => c.obligation === "inspect-desk")!.id);
+  e.storage.setCampaignState("f03e2e", "active", { kind: "user", id: "t" });
+  const chooseDecide = (ctx: { messages: unknown[] }): import("../../src/runtime/pi/scripted-stream.ts").ScriptedTurn => {
+    const called = toolNamesCalled(ctx.messages);
+    if (called.includes("propose_plan") && !called.includes("finish_decision")) {
+      return { type: "tool_calls", calls: [{ name: "finish_decision", arguments: { summary: "ok" } }] };
+    }
+    if (called.includes("finish_decision")) return { type: "text", text: "done" };
+    return { type: "tool_calls", calls: [{ name: "propose_plan", arguments: { operations: [], no_change_reason: "fine" } }] };
+  };
+  const chooseExecute = chooserFor(e);
+  const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 10, pollWaitMs: 20, chooseDecide, chooseExecute });
+  void e;
+  const root = String(e2.storage.list("goals", "f03e2e")[0]!.id);
+  e2.storage.proposeStepDirect({
+    campaign_id: "f03e2e",
+    producer_id: "t",
+    submission_id: "seed",
+    question: "seed work",
+    kind: "explore",
+    goal_refs: [root],
+    preconditions: { op: "all", of: [] },
+    method_family: "generic",
+    expected_observations: [],
+    completion_criteria: "done",
+    fingerprint: "f03e2e-seed",
+    reopen_rule: { kind: "always" },
+  });
+  await e2.start("f03e2e");
+  const cov = e2.storage.list("coverage_items", "f03e2e").find((c) => c.id === covHolder.id)!;
+  assert.equal(cov.execution_state, "tested", "the declared obligation is testable end to end");
+  const step = e2.storage.list("steps", "f03e2e").find((s) => s.question === "test the desk obligation")!;
+  assert.match(String(step.input_refs_json), new RegExp(covHolder.id), "input_refs persisted from the tool call");
+  e.close();
+  e2.close();
 });

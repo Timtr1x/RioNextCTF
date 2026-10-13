@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DomainError } from "../domain/errors.ts";
 import type { DockerCli, DockerExecResult } from "./docker-cli.ts";
 import { ProcessDockerCli } from "./docker-cli.ts";
-import { checkEgress, checkRedirect, parseAllowList, parseDestination, type AllowEntry, type ResolveFn } from "./egress.ts";
+import { checkEgress, checkRedirect, isLoopbackHost, parseAllowList, parseDestination, type AllowEntry, type ResolveFn } from "./egress.ts";
 import {
   assertKaliArgv,
   DEFAULT_KALI_LIMITS,
@@ -247,6 +248,47 @@ function defaultResolve(host: string): string[] {
   throw new DomainError("dns_failed", `dns_failed:${host}`, "denied");
 }
 
+/** Async DNS for worker paths: native dns.promises first, docker getent as the
+ *  cold fallback. Never spawnSync's a child for a warm lookup. */
+export async function defaultResolveAsync(host: string): Promise<string[]> {
+  if (isIpv4(host)) return [host];
+  const cached = resolveCache.get(host);
+  if (cached) return cached;
+  try {
+    const { lookup } = await import("node:dns/promises");
+    const rows = await lookup(host, { family: 4, all: true });
+    const ips = [...new Set(rows.map((r) => r.address).filter((a) => isIpv4(a)))];
+    if (ips.length) {
+      resolveCache.set(host, ips);
+      return ips;
+    }
+  } catch {
+    // fall through to the container resolver
+  }
+  const fromDocker = dockerResolve4(host);
+  if (fromDocker.length) {
+    resolveCache.set(host, fromDocker);
+    return fromDocker;
+  }
+  throw new DomainError("dns_failed", `dns_failed:${host}`, "denied");
+}
+
+/** Async workspace size, fs.promises throughout. */
+export async function workspaceBytesAsync(root: string): Promise<number> {
+  if (!existsSync(root)) return 0;
+  let n = 0;
+  const walk = async (dir: string): Promise<void> => {
+    for (const name of await readdir(dir)) {
+      const p = join(dir, name);
+      const st = await stat(p);
+      if (st.isDirectory()) await walk(p);
+      else n += st.size;
+    }
+  };
+  await walk(root);
+  return n;
+}
+
 export function assertNoSecretEnv(env: Record<string, string>): void {
   const banned = /^(AWS_|OPENAI|ANTHROPIC|API_KEY|TOKEN|SECRET|PASSWORD|RIONEXT_PROVIDER)/i;
   for (const k of Object.keys(env)) {
@@ -376,6 +418,51 @@ export class KaliRuntime {
     );
   }
 
+  /** Async admission for worker paths: DNS resolves via dns.promises, disk scan via fs.promises. */
+  private async admitExecAsync(opts: KaliStartOpts, bin: string, args: string[], extra?: { url?: string; redirects?: string[] }): Promise<void> {
+    assertKaliArgv(bin, args, opts.capabilities);
+    const allow = parseAllowList(opts.allowAssets);
+    const resolveAsync = opts.resolve
+      ? (h: string) => Promise.resolve(opts.resolve!(h))
+      : (h: string) => defaultResolveAsync(h);
+    const pre = new Map<string, string[]>();
+    const presolve = async (raw: string): Promise<void> => {
+      try {
+        const d = parseDestination(raw);
+        if (!isLoopbackHost(d.host) && !pre.has(d.host)) pre.set(d.host, await resolveAsync(d.host));
+      } catch {
+        // malformed dest is denied later by the sync checks
+      }
+    };
+    if (extra?.url) {
+      await presolve(extra.url);
+      for (const loc of extra.redirects ?? []) await presolve(loc);
+    } else if (TCP_CLIENT_BINS.has(bin)) {
+      const dest = tcpDestFromArgs(bin, args);
+      if (dest) await presolve(dest);
+    } else if (looksLikeHostArg(args)) {
+      const dest = args.find((a) => a.includes(".") && !a.startsWith("-"));
+      if (dest) await presolve(dest);
+    }
+    const syncResolve = (host: string): string[] => {
+      const hit = pre.get(host);
+      if (hit) return hit;
+      throw new DomainError("dns_failed", `dns_failed:${host}`, "denied");
+    };
+    if (extra?.url) this.admitNet(extra.url, allow, syncResolve, extra.redirects ?? []);
+    else if (TCP_CLIENT_BINS.has(bin)) {
+      const dest = tcpDestFromArgs(bin, args);
+      if (dest) this.admitNet(dest, allow, syncResolve, []);
+    } else if (looksLikeHostArg(args)) {
+      const dest = args.find((a) => a.includes(".") && !a.startsWith("-"));
+      if (dest) this.admitNet(dest, allow, syncResolve, []);
+    }
+    const used = await workspaceBytesAsync(opts.workspaceHost);
+    if (used > DEFAULT_KALI_LIMITS.maxWorkspaceBytes) {
+      throw new DomainError("disk_cap", "workspace disk occupancy exceeds limit", "denied");
+    }
+  }
+
   /** Admission shared by exec and execAsync: argv allowlist, egress, disk cap. */
   private admitExec(opts: KaliStartOpts, bin: string, args: string[], extra?: { url?: string; redirects?: string[] }): void {
     assertKaliArgv(bin, args, opts.capabilities);
@@ -406,7 +493,7 @@ export class KaliRuntime {
     args: string[],
     extra?: { url?: string; redirects?: string[]; timeout_ms?: number; executionId?: string; background?: boolean; signal?: AbortSignal },
   ): Promise<DockerExecResult & { truncated: boolean; container: string; pending?: boolean }> {
-    this.admitExec(opts, bin, args, extra);
+    await this.admitExecAsync(opts, bin, args, extra);
     const spec = await this.ensureAsync(opts, extra?.signal);
     const background = extra?.background ?? shouldBackgroundKali(bin, extra?.timeout_ms);
     if (background) {
@@ -620,6 +707,29 @@ export class KaliRuntime {
     const box = this.inspectName(opts.shared?.name ?? containerName(opts.campaignId));
     if (box === "missing" || box === "exited") return "failed";
     return "unknown";
+  }
+
+  /** Polling-friendly variant: fs.promises and runAsync, no spawnSync. */
+  async backgroundStatusAsync(opts: KaliStartOpts, executionId: string): Promise<"unknown" | "completed" | "failed"> {
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
+    if (existsSync(files.exit)) {
+      const { readFile } = await import("node:fs/promises");
+      const code = Number((await readFile(files.exit, "utf8")).trim());
+      return code === 0 ? "completed" : "failed";
+    }
+    const box = await this.inspectNameAsync(opts.shared?.name ?? containerName(opts.campaignId));
+    if (box === "missing" || box === "exited") return "failed";
+    return "unknown";
+  }
+
+  inspectCampaignAsync(campaignId: string): Promise<"running" | "exited" | "missing"> {
+    return this.inspectNameAsync(containerName(campaignId));
+  }
+
+  private async inspectNameAsync(name: string): Promise<"running" | "exited" | "missing"> {
+    const r = await this.docker.runAsync(["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 5_000 });
+    if (r.code !== 0) return "missing";
+    return r.stdout.trim() === "true" ? "running" : "exited";
   }
 
   private execBackground(

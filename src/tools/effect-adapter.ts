@@ -3,9 +3,12 @@ import { join } from "node:path";
 
 export interface EffectAdapter {
   send(invocationId: string, payload: unknown): { execution_id: string; pending?: boolean };
-  /** Async send for worker paths; implementations must not block the loop. */
-  sendAsync(invocationId: string, payload: unknown): Promise<{ execution_id: string; pending?: boolean }>;
+  /** Async send for worker paths; implementations must not block the loop.
+   *  Aborting `signal` kills only this invocation's work. */
+  sendAsync(invocationId: string, payload: unknown, signal?: AbortSignal): Promise<{ execution_id: string; pending?: boolean }>;
   query(executionId: string): "unknown" | "completed" | "failed";
+  /** Async query for controller polling; falls back to query when absent. */
+  queryAsync?(executionId: string): Promise<"unknown" | "completed" | "failed">;
   sendCount(): number;
 }
 
@@ -27,7 +30,7 @@ export class FileEffectAdapter implements EffectAdapter {
     return { execution_id };
   }
 
-  sendAsync(invocationId: string, payload: unknown): Promise<{ execution_id: string }> {
+  sendAsync(invocationId: string, payload: unknown, _signal?: AbortSignal): Promise<{ execution_id: string }> {
     return Promise.resolve(this.send(invocationId, payload));
   }
 

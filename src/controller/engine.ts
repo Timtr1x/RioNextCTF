@@ -324,7 +324,7 @@ export class Engine {
       .listOperations(campaignId)
       .filter((o) => ["running", "unknown"].includes(String(o.state)))
       .filter((o) => !invocationId || String(o.invocation_id) === invocationId);
-    const rec = this.dispatchGate.recover(campaignId, invocationId, new Set(this.activeWorkers.keys()));
+    const rec = await this.dispatchGate.recover(campaignId, invocationId, new Set(this.activeWorkers.keys()));
     for (const op of pending) {
       const now = this.storage.getOperation(String(op.execution_id));
       if (!now) continue;

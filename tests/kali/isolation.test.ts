@@ -215,7 +215,7 @@ test("kali_start protocol_error is failed_known and drops the workspace lock", (
   assert.equal(String(e.invocations.get(sent.invocation_id).state), "failed_known");
 });
 
-test("recover drops workspace lock when uncertain kali never got an external_id", () => {
+test("recover drops workspace lock when uncertain kali never got an external_id", async () => {
   const dir = tmp();
   const docker = new FakeDockerCli();
   const e = kaliEngine(dir, docker);
@@ -236,7 +236,7 @@ test("recover drops workspace lock when uncertain kali never got an external_id"
   e.budget.markLiability("t-rec", inv.id, 1, 0, 0);
   e.invocations.mark(inv.id, "uncertain", { error: "generic boom" });
   assert.equal(e.storage.acquireResourceLock("t-rec", "workspace:t-rec", inv.id, false), true);
-  const rec = e.dispatchGate.recover("t-rec");
+  const rec = await e.dispatchGate.recover("t-rec");
   assert.equal(rec.reconciled >= 1, true);
   assert.equal(e.storage.listResourceLocks("t-rec").length, 0);
   assert.equal(String(e.invocations.get(inv.id).state), "failed_known");

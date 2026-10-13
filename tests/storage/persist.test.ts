@@ -462,6 +462,9 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
   e.createCampaign(spec);
   const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
+  const covId = String(
+    e.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk")!.id,
+  );
   e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
     producer_id: "t",
@@ -476,6 +479,7 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
     completion_criteria: "none",
     fingerprint: "f36-fp",
     reopen_rule: { kind: "always" },
+    input_refs: [{ id: covId, revision: e.storage.entityRevisionFor(spec.campaign_id, covId)! }],
   });
   e.storage.finishRun(spec.campaign_id, decide.run_id, {
     run_id: decide.run_id,
@@ -491,9 +495,6 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
     finish_requested: true,
     protocol_error: null,
   });
-  const covId = String(
-    e.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk")!.id,
-  );
   const art = await e.storage.putArtifact(spec.campaign_id, "desk-raw", "text/plain", decide.run_id);
   const obs = e.storage.recordObservation({
     campaign_id: spec.campaign_id,
@@ -535,10 +536,7 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
 
   // now a finish carrying an explicit result marks exactly that item; the
   // supporting observation is produced by the run that cites it
-  const covRow = e2.storage.list("coverage_items", spec.campaign_id).find((c) => c.id === covId)!;
-  e2.storage.store.db
-    .prepare("UPDATE steps SET status = 'ready', input_refs_json = ? WHERE fingerprint = 'f36-fp'")
-    .run(JSON.stringify([{ id: covId, revision: Number(covRow.revision ?? 1) }]));
+  e2.storage.store.db.prepare("UPDATE steps SET status = 'ready' WHERE fingerprint = 'f36-fp'").run();
 
   const claimed2 = e2.storage.claimNextStep(spec.campaign_id, "t", e2.storage.getCampaign(spec.campaign_id).epoch)!;
   const obs2 = e2.storage.recordObservation({

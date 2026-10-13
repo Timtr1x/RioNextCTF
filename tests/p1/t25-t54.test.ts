@@ -67,7 +67,7 @@ function leaseFor(e: Engine, campaignId: string): RunLease {
   };
 }
 
-test("T26 prepared crash releases reserve without adapter send", () => {
+test("T26 prepared crash releases reserve without adapter send", async () => {
   const dir = tmp();
   const e = boot(dir, "t26");
   const lease = leaseFor(e, "t26");
@@ -86,13 +86,13 @@ test("T26 prepared crash releases reserve without adapter send", () => {
   e.close();
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1, effectAdapter: adapter });
   const gate = new DispatchGate(e2.storage, e2.budget, new InvocationBook(e2.storage), adapter);
-  const rec = gate.recover("t26");
+  const rec = await gate.recover("t26");
   assert.equal(rec.prepared_released, 1);
   assert.equal(adapter.sendCount(), 0);
   e2.close();
 });
 
-test("T27 dispatching crash is uncertain and not replayed", () => {
+test("T27 dispatching crash is uncertain and not replayed", async () => {
   const dir = tmp();
   const e = boot(dir, "t27");
   const campId = "t27";
@@ -110,7 +110,7 @@ test("T27 dispatching crash is uncertain and not replayed", () => {
   e.close();
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1, effectAdapter: adapter });
   const gate2 = new DispatchGate(e2.storage, e2.budget, new InvocationBook(e2.storage), adapter);
-  const rec = gate2.recover(campId);
+  const rec = await gate2.recover(campId);
   assert.equal(rec.marked_uncertain >= 1, true);
   assert.equal(adapter.sendCount(), 0);
   const states = e2.invocations.nonTerminal(campId).map((r) => r.state);
@@ -118,7 +118,7 @@ test("T27 dispatching crash is uncertain and not replayed", () => {
   e2.close();
 });
 
-test("T25 effect done before DB commit reconciles without second send", () => {
+test("T25 effect done before DB commit reconciles without second send", async () => {
   const dir = tmp();
   const e = boot(dir, "t25");
   const campId = "t25";
@@ -140,7 +140,7 @@ test("T25 effect done before DB commit reconciles without second send", () => {
   e.close();
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1, effectAdapter: adapter });
   const gate2 = new DispatchGate(e2.storage, e2.budget, new InvocationBook(e2.storage), adapter);
-  const rec = gate2.recover(campId);
+  const rec = await gate2.recover(campId);
   assert.equal(adapter.sendCount(), 1);
   assert.equal(rec.reconciled, 1);
   const row = e2.invocations.get(invId);

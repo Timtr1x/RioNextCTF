@@ -157,6 +157,29 @@ export class KaliEffectAdapter implements EffectAdapter {
     return mem ?? "unknown";
   }
 
+  /** Same as query but without spawnSync on the polling path. */
+  async queryAsync(executionId: string): Promise<"unknown" | "completed" | "failed"> {
+    const mem = this.last.get(executionId);
+    if (mem === "completed" || mem === "failed") return mem;
+    try {
+      const invId = executionId.startsWith("kali_") ? executionId.slice("kali_".length) : "";
+      if (invId) {
+        const opts = this.optsFor(invId);
+        const bg = await this.runtime.backgroundStatusAsync(opts, executionId);
+        if (bg === "completed" || bg === "failed") {
+          this.last.set(executionId, bg);
+          return bg;
+        }
+        const box = await this.runtime.inspectCampaignAsync(opts.campaignId);
+        if (box === "missing" || box === "exited") return "failed";
+        return "unknown";
+      }
+    } catch {
+      // invocation missing after restart
+    }
+    return mem ?? "unknown";
+  }
+
   sendCount(): number {
     return this.n;
   }
@@ -177,14 +200,19 @@ export class RoutingEffectAdapter implements EffectAdapter {
     return this.file.send(invocationId, payload);
   }
 
-  sendAsync(invocationId: string, payload: unknown): Promise<{ execution_id: string; pending?: boolean }> {
-    if (isKaliPayload(payload)) return this.kali.sendAsync(invocationId, payload);
-    return this.file.sendAsync(invocationId, payload);
+  sendAsync(invocationId: string, payload: unknown, signal?: AbortSignal): Promise<{ execution_id: string; pending?: boolean }> {
+    if (isKaliPayload(payload)) return this.kali.sendAsync(invocationId, payload, signal);
+    return this.file.sendAsync(invocationId, payload, signal);
   }
 
   query(executionId: string): "unknown" | "completed" | "failed" {
     if (executionId.startsWith("kali_")) return this.kali.query(executionId);
     return this.file.query(executionId);
+  }
+
+  queryAsync(executionId: string): Promise<"unknown" | "completed" | "failed"> {
+    if (executionId.startsWith("kali_")) return this.kali.queryAsync(executionId);
+    return Promise.resolve(this.file.query(executionId));
   }
 
   sendCount(): number {
