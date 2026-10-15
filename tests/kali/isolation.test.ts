@@ -728,7 +728,7 @@ test("bash and curl stay synchronous even when timeout_ms exceeds 60s", () => {
   );
   const exec = docker.calls.find((c) => c[0] === "exec");
   assert.ok(exec);
-  assert.ok(exec.includes("180"));
+  assert.ok(exec.some((a) => a.includes("timeout 180")), "the cap survives inside the exec script");
 });
 
 test("nmap is detached so dispatch does not wait, then poll ingests when exit file appears", async () => {

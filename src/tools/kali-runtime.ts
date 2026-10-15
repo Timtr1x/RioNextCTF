@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -577,17 +577,38 @@ export class KaliRuntime {
     }
     const capSec = Math.ceil((extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) / 1000);
     runDirHost(opts);
-    const argv = ["exec", "-w", runRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
+    // Persistent execution record + in-container pid marker (H04 §6.5): the
+    // foreground path is recoverable too, and cancellation can find and stop
+    // exactly this invocation's process group.
+    const executionId = extra?.executionId ?? `kali_${opts.campaignId}_${Date.now()}`;
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
+    const record: ExecRecord = {
+      execution_id: executionId,
+      container: spec.name,
+      run_id: opts.runId ?? null,
+      argv_preview: [bin, ...args].slice(0, 12),
+      phase: "started",
+      started_at: new Date().toISOString(),
+    };
+    writeExecRecord(files.json, record);
+    const quoted = [bin, ...args].map(shQuote).join(" ");
+    const argv = ["exec", "-w", runRootOf(opts), spec.name, "sh", "-c", `echo $$ > ${shQuote(files.containerPid)}; exec timeout ${capSec} ${quoted}`];
     const result = await this.docker.runAsync(argv, {
       timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
       signal: extra?.signal,
     });
+    if (extra?.signal?.aborted) {
+      // Killing the host docker client does not stop the in-container process.
+      // Terminate the process group by its persisted marker and confirm.
+      await this.cancelExecution(opts, executionId).catch(() => "unknown" as const);
+    }
     const truncated =
       result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     // The in-container `timeout` wrapper already reaped this invocation's
     // process. Never kill the container here: sibling runs share it (C4).
+    writeExecRecord(files.json, { ...record, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
     const out = { ...result, truncated, container: spec.name };
     this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
@@ -765,11 +786,21 @@ export class KaliRuntime {
     const script = [
       "#!/bin/sh",
       "set +e",
+      `echo $$ > ${shQuote(files.containerPid)}`,
       `timeout ${capSec} ${quoted} > ${shQuote(files.containerOut)} 2> ${shQuote(files.containerErr)}`,
       `echo $? > ${shQuote(files.containerExit)}`,
       "",
     ].join("\n");
     writeFileSync(files.sh, script, { encoding: "utf8" });
+    const record: ExecRecord = {
+      execution_id: executionId,
+      container,
+      run_id: opts.runId ?? null,
+      argv_preview: [bin, ...args].slice(0, 12),
+      phase: "started",
+      started_at: new Date().toISOString(),
+    };
+    writeExecRecord(files.json, record);
     runDirHost(opts);
     const started = await this.docker.runAsync(["exec", "-d", "-w", runRootOf(opts), container, "sh", files.containerSh], {
       timeoutMs: 15_000,
@@ -777,6 +808,9 @@ export class KaliRuntime {
     });
     if (started.code !== 0) {
       throw new DomainError("kali_start", started.stderr || "background exec failed", "protocol_error");
+    }
+    if (signal?.aborted) {
+      await this.cancelExecution(opts, executionId).catch(() => "unknown" as const);
     }
     const out = {
       stdout: JSON.stringify({ pending: true, execution_id: executionId, path: files.containerOut }),
@@ -867,7 +901,19 @@ export class KaliRuntime {
     }
     const capSec = Math.ceil((extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) / 1000);
     runDirHost(opts);
-    const argv = ["exec", "-w", runRootOf(opts), spec.name, "timeout", String(capSec), bin, ...args];
+    const executionId = extra?.executionId ?? `kali_${opts.campaignId}_${Date.now()}`;
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
+    const record: ExecRecord = {
+      execution_id: executionId,
+      container: spec.name,
+      run_id: opts.runId ?? null,
+      argv_preview: [bin, ...args].slice(0, 12),
+      phase: "started",
+      started_at: new Date().toISOString(),
+    };
+    writeExecRecord(files.json, record);
+    const quoted = [bin, ...args].map(shQuote).join(" ");
+    const argv = ["exec", "-w", runRootOf(opts), spec.name, "sh", "-c", `echo $$ > ${shQuote(files.containerPid)}; exec timeout ${capSec} ${quoted}`];
     const result = this.docker.run(argv, {
       timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
@@ -877,6 +923,7 @@ export class KaliRuntime {
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     // The in-container `timeout` wrapper already reaped this invocation's
     // process. Never kill the container here: sibling runs share it (C4).
+    writeExecRecord(files.json, { ...record, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
     const out = { ...result, truncated, container: spec.name };
     this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
@@ -902,6 +949,10 @@ export class KaliRuntime {
       container: opts.shared?.name ?? containerName(opts.campaignId),
       pending: false,
     };
+    const record = readExecRecord(files.json);
+    if (record) {
+      writeExecRecord(files.json, { ...record, phase: "ended", code, timed_out: code === 124, ended_at: new Date().toISOString() });
+    }
     this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
   }
@@ -917,7 +968,9 @@ export class KaliRuntime {
     return "unknown";
   }
 
-  /** Polling-friendly variant: fs.promises and runAsync, no spawnSync. */
+  /** Polling-friendly variant: fs.promises and runAsync, no spawnSync. The
+   *  persistent exec record covers foreground commands, whose exit never
+   *  writes an .exit file (E15). */
   async backgroundStatusAsync(opts: KaliStartOpts, executionId: string): Promise<"unknown" | "completed" | "failed"> {
     const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
     if (existsSync(files.exit)) {
@@ -925,9 +978,49 @@ export class KaliRuntime {
       const code = Number((await readFile(files.exit, "utf8")).trim());
       return code === 0 ? "completed" : "failed";
     }
+    const record = readExecRecord(files.json);
+    if (record?.phase === "ended") return record.code === 0 ? "completed" : "failed";
     const box = await this.inspectNameAsync(opts.shared?.name ?? containerName(opts.campaignId));
     if (box === "missing" || box === "exited") return "failed";
     return "unknown";
+  }
+
+  /**
+   * Cancel exactly one invocation's in-container process group (H04 §6.10).
+   * Identity is checked against the persistent record and the pid marker's
+   * cmdline before anything is signaled, so a reused pid or container name
+   * never kills the wrong process (E16). Killing the host docker CLI is never
+   * treated as proof the container side stopped (E17).
+   */
+  async cancelExecution(opts: KaliStartOpts, executionId: string): Promise<"confirmed" | "already_done" | "unknown"> {
+    const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
+    const record = readExecRecord(files.json);
+    if (record?.phase === "ended") return "already_done";
+    const container = opts.shared?.name ?? containerName(opts.campaignId);
+    if (record && record.container !== container) return "unknown"; // identity mismatch: refuse to touch
+    if (record) {
+      writeExecRecord(files.json, { ...record, cancel_requested: true });
+    }
+    const box = await this.inspectNameAsync(container);
+    if (box !== "running") {
+      // A stopped container has no live processes: positive confirmation.
+      if (record) writeExecRecord(files.json, { ...record, cancel_requested: true, cancel_confirmed: true });
+      return "confirmed";
+    }
+    const probeCmd = `if [ -f ${shQuote(files.containerPid)} ]; then P=$(cat ${shQuote(files.containerPid)}); if kill -0 "$P" 2>/dev/null && grep -q ${shQuote(executionId)} /proc/$P/cmdline 2>/dev/null; then echo alive; else echo dead; fi; else echo dead; fi`;
+    const probe = await this.docker.runAsync(["exec", container, "sh", "-c", probeCmd], { timeoutMs: 8_000 });
+    if (probe.stdout.trim() !== "alive") {
+      if (record) writeExecRecord(files.json, { ...record, cancel_requested: true, cancel_confirmed: true });
+      return "confirmed";
+    }
+    await this.docker.runAsync(
+      ["exec", container, "sh", "-c", `P=$(cat ${shQuote(files.containerPid)}); kill -TERM -"$P" 2>/dev/null || kill -TERM "$P"`],
+      { timeoutMs: 8_000 },
+    );
+    const recheck = await this.docker.runAsync(["exec", container, "sh", "-c", probeCmd], { timeoutMs: 8_000 });
+    const dead = recheck.stdout.trim() !== "alive";
+    if (dead && record) writeExecRecord(files.json, { ...record, cancel_requested: true, cancel_confirmed: true });
+    return dead ? "confirmed" : "unknown";
   }
 
   inspectCampaignAsync(campaignId: string): Promise<"running" | "exited" | "missing"> {
@@ -955,11 +1048,20 @@ export class KaliRuntime {
     const script = [
       "#!/bin/sh",
       "set +e",
+      `echo $$ > ${shQuote(files.containerPid)}`,
       `timeout ${capSec} ${quoted} > ${shQuote(files.containerOut)} 2> ${shQuote(files.containerErr)}`,
       `echo $? > ${shQuote(files.containerExit)}`,
       "",
     ].join("\n");
     writeFileSync(files.sh, script, { encoding: "utf8" });
+    writeExecRecord(files.json, {
+      execution_id: executionId,
+      container,
+      run_id: opts.runId ?? null,
+      argv_preview: [bin, ...args].slice(0, 12),
+      phase: "started",
+      started_at: new Date().toISOString(),
+    });
     runDirHost(opts);
     const started = this.docker.run(["exec", "-d", "-w", runRootOf(opts), container, "sh", files.containerSh], {
       timeoutMs: 15_000,
@@ -1269,10 +1371,14 @@ function opFiles(workspaceHost: string, executionId: string, containerRoot = "/w
   out: string;
   err: string;
   exit: string;
+  json: string;
+  pid: string;
   containerSh: string;
   containerOut: string;
   containerErr: string;
   containerExit: string;
+  containerJson: string;
+  containerPid: string;
 } {
   const id = executionId.replace(/[^a-zA-Z0-9_.-]/g, "_");
   const dir = join(workspaceHost, ".rionext-ops");
@@ -1281,9 +1387,50 @@ function opFiles(workspaceHost: string, executionId: string, containerRoot = "/w
     out: join(dir, `${id}.out`),
     err: join(dir, `${id}.err`),
     exit: join(dir, `${id}.exit`),
+    json: join(dir, `${id}.json`),
+    pid: join(dir, `${id}.pid`),
     containerSh: `${containerRoot}/.rionext-ops/${id}.sh`,
     containerOut: `${containerRoot}/.rionext-ops/${id}.out`,
     containerErr: `${containerRoot}/.rionext-ops/${id}.err`,
     containerExit: `${containerRoot}/.rionext-ops/${id}.exit`,
+    containerJson: `${containerRoot}/.rionext-ops/${id}.json`,
+    containerPid: `${containerRoot}/.rionext-ops/${id}.pid`,
   };
+}
+
+/**
+ * The persistent per-execution record (H04 §6.5): what was launched, where,
+ * for which run, and how it ended. Written atomically (tmp + rename) so a
+ * query never reads a half-written record.
+ */
+export interface ExecRecord {
+  execution_id: string;
+  container: string;
+  run_id: string | null;
+  argv_preview: string[];
+  phase: "started" | "ended";
+  started_at: string;
+  ended_at?: string;
+  code?: number;
+  timed_out?: boolean;
+  cancel_requested?: boolean;
+  cancel_confirmed?: boolean;
+}
+
+export function writeExecRecord(path: string, record: ExecRecord): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(record), "utf8");
+  // rename over the target is atomic on POSIX and on Windows (Node maps to
+  // MoveFileEx with REPLACE_EXISTING).
+  renameSync(tmp, path);
+}
+
+export function readExecRecord(path: string): ExecRecord | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as ExecRecord;
+    return parsed && typeof parsed.execution_id === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
