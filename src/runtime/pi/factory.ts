@@ -282,6 +282,7 @@ export class PiWorker implements WorkerRuntime {
             ),
             skip_progress: true,
             request_review: false,
+            lease,
           });
         }
         if (
@@ -531,6 +532,7 @@ export class PiWorker implements WorkerRuntime {
             campaign_id: lease.campaign_id,
             run_id: lease.run_id,
             fence: lease.fence,
+            controller_generation: lease.controller_generation,
             submission_id: callId,
             payload: parsed.value,
             observation_ids: [...this.submittedObservations],
@@ -696,6 +698,7 @@ export class PiWorker implements WorkerRuntime {
               no_change_reason: p.no_change_reason,
               read_set: [...this.readSetByKey.values()],
               reviewed_through_seq: context.manifest.graph_snapshot_seq,
+              lease,
             });
             return ok(result);
           } catch (err) {
@@ -738,6 +741,7 @@ export class PiWorker implements WorkerRuntime {
             artifact_refs: [art.id],
             conditions: p.conditions ?? {},
             env_rev: String((s.getWorld<LabWorld>(lease.campaign_id, { env_rev: "env-1" } as LabWorld) as LabWorld).env_rev ?? "env-1"),
+            lease,
           });
           this.recordSubmit("obs", result.canonical_ids.observation_id);
           return ok(result);
@@ -760,6 +764,7 @@ export class PiWorker implements WorkerRuntime {
             support_refs: p.support_refs,
             conditions: p.conditions ?? {},
             source_grade: p.source_grade,
+            lease,
           });
           this.recordSubmit("fact", result.canonical_ids.fact_id);
           return ok(result);
@@ -782,6 +787,7 @@ export class PiWorker implements WorkerRuntime {
             dedup_key: p.dedup_key,
             impact: p.impact,
             model_confidence: p.model_confidence,
+            lease,
           });
           this.recordSubmit("find", result.canonical_ids.finding_id);
           return ok(result);
@@ -848,6 +854,7 @@ export class PiWorker implements WorkerRuntime {
             fingerprint,
             reopen_rule: { kind: "never" },
             retry_reason: p.retry_reason,
+            lease,
             input_refs: inputRefs,
           });
           return ok(result);

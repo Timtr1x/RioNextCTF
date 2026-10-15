@@ -123,6 +123,7 @@ test("a provider that fails twice is retried and the run still resolves", async 
       finish_requested: true,
       protocol_error: null,
     });
+    e.storage.releaseControllerLock(spec.campaign_id, "seed", decide.controller_generation);
     e.storage.setCampaignState(spec.campaign_id, "active", { kind: "user", id: "t" });
 
     const outcome = await e.runExecuteSlot(spec.campaign_id);

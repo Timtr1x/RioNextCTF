@@ -103,6 +103,14 @@ export class DispatchGate {
       if (Number(run.fence) !== req.lease.fence) {
         return { ok: false as const, reason: "stale_fence", invocation_id: "none" };
       }
+      if (run.controller_generation != null) {
+        // L09: the controller generation that claimed this run must still hold
+        // the lock; a taken-over or lapsed controller fences off its runs.
+        const lock = this.storage.store.db
+          .prepare("SELECT 1 FROM controller_locks WHERE campaign_id = ? AND generation = ? AND lease_until > ?")
+          .get(req.lease.campaign_id, Number(run.controller_generation), Date.now());
+        if (!lock) return { ok: false as const, reason: "controller_lost", invocation_id: "none" };
+      }
       if (req.envTool && !this.storage.envAdmissionOpen(req.lease.run_id)) {
         return { ok: false as const, reason: "finish_closed_env", invocation_id: "none" };
       }

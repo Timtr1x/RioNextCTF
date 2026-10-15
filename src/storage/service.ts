@@ -25,6 +25,7 @@ import type {
   ProposalOp,
   ReadSetEntry,
   RenewResult,
+  RunLease,
   StepKind,
   StepStatus,
   SubmitFactResultStatus,
@@ -819,9 +820,12 @@ export class StorageService {
     skip_progress?: boolean;
     /** Internal: raw tool dumps pass false; the fragment end requests review once. */
     request_review?: boolean;
+    /** Worker writes carry their lease; the write transaction re-verifies it. */
+    lease?: RunLease;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, () => {
       this.assertRun(args.campaign_id, args.run_id);
+      if (args.lease) this.assertWorkerWrite(args.lease);
       const now = nowIso();
       const id = newId("obs");
       const seq = this.appendEvent(
@@ -875,9 +879,12 @@ export class StorageService {
     source_grade?: FactSourceGrade;
     /** Internal: Decide-applied hypotheses pass false; their batch is the review. */
     request_review?: boolean;
+    /** Worker writes carry their lease; the write transaction re-verifies it. */
+    lease?: RunLease;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, (): IdempotentResult => {
       this.assertRun(args.campaign_id, args.run_id);
+      if (args.lease) this.assertWorkerWrite(args.lease);
       const supportOk = args.support_refs.length > 0 && this.refsExist(args.campaign_id, args.support_refs);
       if (!supportOk) {
         return {
@@ -969,9 +976,12 @@ export class StorageService {
     impact?: string;
     conditions?: Record<string, unknown>;
     model_confidence?: number;
+    /** Worker writes carry their lease; the write transaction re-verifies it. */
+    lease?: RunLease;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, (): IdempotentResult => {
       this.assertRun(args.campaign_id, args.run_id);
+      if (args.lease) this.assertWorkerWrite(args.lease);
       if (args.evidence_refs.length === 0 || !this.refsExist(args.campaign_id, args.evidence_refs)) {
         return {
           status: "ok" as const,
@@ -1101,8 +1111,11 @@ export class StorageService {
     /** Internal: Decide-applied plan steps pass false; the batch is the review. */
     request_review?: boolean;
     retry_reason?: string;
+    /** Worker writes carry their lease; the write transaction re-verifies it. */
+    lease?: RunLease;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, (): IdempotentResult => {
+      if (args.lease) this.assertWorkerWrite(args.lease);
       this.assertRefsSameCampaign(args.campaign_id, args.goal_refs);
       if (args.input_refs) {
         for (const ref of args.input_refs) {
@@ -1197,8 +1210,11 @@ export class StorageService {
     /** Internal: the graph snapshot the Decide run actually saw (H). The model
      *  never sends this; the worker fills it from the context manifest. */
     reviewed_through_seq?: number;
+    /** Worker writes carry their lease; the write transaction re-verifies it. */
+    lease?: RunLease;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, () => {
+      if (args.lease) this.assertWorkerWrite(args.lease);
       const camp = this.getCampaign(args.campaign_id);
       if (args.read_set && args.read_set.length > 0) {
         const conflictEntry = this.readSetConflicts(args.campaign_id, args.read_set);
@@ -1389,17 +1405,14 @@ export class StorageService {
 
   /**
    * Convenience for callers that do not already hold the controller lock:
-   * acquire, claim, then expire the lock again so a one-off seed/verify claim
-   * never blocks the real controller. Not a bypass — the lock acquisition is
-   * the proof, and the claim itself is still fenced by it.
+   * acquire (or renew) it, then claim. The lock STAYS HELD afterwards — the
+   * caller is now the controller and must releaseControllerLock when done.
+   * Not a bypass: the lock acquisition is the proof and the claim is fenced
+   * by it. Engines holding a lease call claimNextStep directly.
    */
   claimNextStepAsOwner(campaignId: string, owner: string, fenceSeed: number, leaseMs = 60 * 60_000) {
     const { generation } = this.acquireControllerLock(campaignId, owner, leaseMs);
-    try {
-      return this.claimNextStep(campaignId, { campaign_id: campaignId, owner, generation }, fenceSeed, leaseMs);
-    } finally {
-      this.releaseControllerLock(campaignId, owner, generation);
-    }
+    return this.claimNextStep(campaignId, { campaign_id: campaignId, owner, generation }, fenceSeed, leaseMs);
   }
 
   /** The controller lock row currently matches owner+generation and is unexpired. */
@@ -1516,23 +1529,38 @@ export class StorageService {
     });
   }
 
-  /** See claimNextStepAsOwner: lock acquisition first, claim, then expire it. */
+  /** See claimNextStepAsOwner: acquire, claim, keep the lock (release it when done). */
   claimDecideAsOwner(campaignId: string, owner: string, leaseMs = 60 * 60_000) {
     const { generation } = this.acquireControllerLock(campaignId, owner, leaseMs);
-    try {
-      return this.claimDecide(campaignId, { campaign_id: campaignId, owner, generation }, leaseMs);
-    } finally {
-      this.releaseControllerLock(campaignId, owner, generation);
-    }
+    return this.claimDecide(campaignId, { campaign_id: campaignId, owner, generation }, leaseMs);
   }
 
-  finishRun(campaignId: string, runId: string, outcome: TaskOutcome): { applied: boolean } {
+  /**
+   * Settle a run. `expected` is the caller's proof of ownership: the fence (and
+   * controller generation, when set) the caller was issued at claim time — the
+   * CAS never trusts the DB copy it just read. Recovery paths (pending-finish
+   * replay) call without `expected`: they act as the trusted recovery actor and
+   * re-validate the payload, revision and conflict rules that already exist.
+   */
+  finishRun(
+    campaignId: string,
+    runId: string,
+    outcome: TaskOutcome,
+    expected?: { fence: number; controller_generation?: number | null },
+  ): { applied: boolean } {
     return this.store.transaction(() => {
       const run = this.store.db.prepare("SELECT * FROM task_runs WHERE id = ? AND campaign_id = ?").get(runId, campaignId) as
         | Record<string, unknown>
         | undefined;
       if (!run) throw invalidInput("run_not_found", "run not found");
       if (String(run.state) === "finished") return { applied: false };
+      if (expected && Number(run.fence) !== expected.fence) return { applied: false };
+      if (
+        expected?.controller_generation != null &&
+        (run.controller_generation == null || Number(run.controller_generation) !== expected.controller_generation)
+      ) {
+        return { applied: false };
+      }
       let appliedOutcome = outcome;
       if (run.finish_payload_json && run.mode === "execute") {
         appliedOutcome = this.outcomeFromFinishPayload(run, String(run.finish_payload_json));
@@ -1964,6 +1992,20 @@ export class StorageService {
       if (Number(run.fence) !== args.fence) {
         throw denied("stale_fence", "finish rejected due to stale fence");
       }
+      if (
+        args.controller_generation != null &&
+        (run.controller_generation == null || Number(run.controller_generation) !== args.controller_generation)
+      ) {
+        throw denied("lease_lost", "finish rejected: controller generation mismatch");
+      }
+      if (args.controller_generation != null) {
+        // The generation that owned this run must still hold the lock: a finish
+        // from a superseded controller is archival material, not a conclusion.
+        const lock = this.store.db
+          .prepare("SELECT 1 FROM controller_locks WHERE campaign_id = ? AND generation = ? AND lease_until > ?")
+          .get(args.campaign_id, args.controller_generation, Date.now());
+        if (!lock) throw denied("lease_lost", "finish rejected: controller generation superseded");
+      }
       const parsed = parseFinishInput(args.payload);
       if (!parsed.ok) {
         this.appendEvent(
@@ -2253,13 +2295,16 @@ export class StorageService {
     this.store.db.prepare("UPDATE task_runs SET context_manifest_json = ?, updated_at = ? WHERE id = ?").run(asJson(manifest), nowIso(), runId);
   }
 
-  saveCheckpoint(args: { campaign_id: string; run_id: string; note: string; next?: string; payload?: unknown }): { id: string } {
+  saveCheckpoint(args: { campaign_id: string; run_id: string; note: string; next?: string; payload?: unknown; lease?: RunLease }): { id: string } {
     const id = newId("ckpt");
-    this.store.db
-      .prepare(
-        "INSERT INTO checkpoints(id, campaign_id, run_id, note, next, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(id, args.campaign_id, args.run_id, args.note, args.next ?? null, asJson(args.payload ?? {}), nowIso());
+    this.store.transaction(() => {
+      if (args.lease) this.assertWorkerWrite(args.lease);
+      this.store.db
+        .prepare(
+          "INSERT INTO checkpoints(id, campaign_id, run_id, note, next, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(id, args.campaign_id, args.run_id, args.note, args.next ?? null, asJson(args.payload ?? {}), nowIso());
+    });
     return { id };
   }
 
@@ -2865,6 +2910,32 @@ export class StorageService {
     const run = this.store.db.prepare("SELECT campaign_id FROM task_runs WHERE id = ?").get(runId) as { campaign_id: string } | undefined;
     if (!run) throw invalidInput("unknown_run", "execution id does not exist");
     if (run.campaign_id !== campaignId) throw denied("cross_campaign_ref", "run belongs to another campaign");
+  }
+
+  /**
+   * Worker-write fence (H03 §5.7): inside the write transaction, the run must
+   * still be live, the caller's fence must match, and — when the lease carries
+   * a controller generation — the run must belong to that generation and that
+   * generation must still hold the controller lock. A fenced-off worker cannot
+   * write new business state; its already-persisted results stay archived.
+   */
+  private assertWorkerWrite(lease: RunLease): void {
+    const run = this.store.db
+      .prepare("SELECT campaign_id, state, fence, controller_generation FROM task_runs WHERE id = ?")
+      .get(lease.run_id) as Record<string, unknown> | undefined;
+    if (!run) throw denied("lease_lost", "run not found");
+    if (String(run.campaign_id) !== lease.campaign_id) throw denied("cross_campaign_ref", "run belongs to another campaign");
+    if (run.state !== "claimed" && run.state !== "running") throw denied("lease_lost", `run is ${String(run.state)}`);
+    if (Number(run.fence) !== lease.fence) throw denied("lease_lost", "stale fence");
+    if (lease.controller_generation != null) {
+      if (run.controller_generation == null || Number(run.controller_generation) !== lease.controller_generation) {
+        throw denied("lease_lost", "run controller generation mismatch");
+      }
+      const lock = this.store.db
+        .prepare("SELECT 1 FROM controller_locks WHERE campaign_id = ? AND owner = ? AND generation = ? AND lease_until > ?")
+        .get(lease.campaign_id, lease.lease_owner, lease.controller_generation, Date.now());
+      if (!lock) throw denied("lease_lost", "controller generation superseded");
+    }
   }
 
   private refsExist(campaignId: string, ids: string[]): boolean {

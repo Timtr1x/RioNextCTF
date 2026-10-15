@@ -346,9 +346,13 @@ test("T28 unique step claim across two connections", () => {
   // and the earlier attempt's live run still occupies a slot until it settles
   e1.storage.store.db.prepare("UPDATE steps SET status = 'ready', active_run_id = NULL WHERE campaign_id = ?").run(campId);
   e1.storage.store.db.prepare("UPDATE task_runs SET state = 'finished' WHERE campaign_id = ? AND mode = 'execute'").run(campId);
-  const a = e1.storage.claimNextStepAsOwner(campId, "w1", 10);
+  // Two connections race under ONE controller lease: the CAS decides.
+  e1.storage.releaseAllControllerLocks("owner-a");
+  const acq = e1.storage.acquireControllerLock(campId, "ctrl", 60_000);
+  const ctrl = { campaign_id: campId, owner: "ctrl", generation: acq.generation };
+  const a = e1.storage.claimNextStep(campId, ctrl, 10);
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
-  const b = e2.storage.claimNextStepAsOwner(campId, "w2", 10);
+  const b = e2.storage.claimNextStep(campId, ctrl, 10);
   const wins = [a, b].filter(Boolean);
   assert.equal(wins.length, 1);
   e1.close();
@@ -632,8 +636,10 @@ test("T42 many events still one Decide lock", () => {
   const e = boot(dir, "t42");
   const campId = "t42";
   for (let i = 0; i < 100; i++) e.storage.markRequested(campId, i + 1);
-  const a = e.storage.claimDecideAsOwner(campId, "d1");
-  const b = e.storage.claimDecideAsOwner(campId, "d2");
+  const acq = e.storage.acquireControllerLock(campId, "d1", 60_000);
+  const ctrl = { campaign_id: campId, owner: "d1", generation: acq.generation };
+  const a = e.storage.claimDecide(campId, ctrl);
+  const b = e.storage.claimDecide(campId, ctrl);
   assert.ok(a);
   assert.equal(b, null);
   e.close();

@@ -73,6 +73,8 @@ export interface SubmitRunOutcomeArgs {
   campaign_id: string;
   run_id: string;
   fence: number;
+  /** Controller generation the caller proved at claim time; checked when set. */
+  controller_generation?: number | null;
   submission_id: string;
   payload: FinishStepInput;
   observation_ids: string[];

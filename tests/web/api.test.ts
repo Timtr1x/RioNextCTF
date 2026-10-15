@@ -332,6 +332,7 @@ test("rionext ui api end to end", async (t) => {
       finish_requested: true,
       protocol_error: null,
     });
+    e.storage.releaseControllerLock("camp_api_goal", "t", run.controller_generation);
     await e.runLoop("camp_api_goal");
     assert.equal(e.storage.getCampaign("camp_api_goal").state, "awaiting_verify");
 

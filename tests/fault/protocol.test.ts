@@ -721,6 +721,7 @@ function seedReadyStep(e: Engine, campaignId: string, question: string, fingerpr
     finish_requested: true,
     protocol_error: null,
   });
+  e.storage.releaseControllerLock(campaignId, "seed", decide.controller_generation);
 }
 
 function legalResolvedChooser(): TurnChooser {
@@ -1441,6 +1442,7 @@ test("F30 blocked reopen_rule=fact_key waits for the fact", async () => {
     finish_requested: true,
     protocol_error: null,
   });
+  e.storage.releaseControllerLock(spec.campaign_id, "fact", decide.controller_generation);
   e.storage.recomputeStepReadiness(spec.campaign_id);
   const second = await e.runExecuteSlot(spec.campaign_id);
   assert.ok(second);
@@ -1452,10 +1454,14 @@ test("F31 expired run A cannot finishRun over run B", async () => {
   const spec = loadDemoSpec("f31");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f31 step", "f31-fp");
-  const a = e.storage.claimNextStepAsOwner(spec.campaign_id, "owner-a", 1)!;
+  // One controller owns the campaign; the expired run A is reclaimed and the
+  // same controller claims run B for the retried step.
+  const acq = e.storage.acquireControllerLock(spec.campaign_id, "ctrl", 60_000);
+  const ctrl = { campaign_id: spec.campaign_id, owner: "ctrl", generation: acq.generation };
+  const a = e.storage.claimNextStep(spec.campaign_id, ctrl, 1)!;
   e.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = 0 WHERE id = ?").run(a.run_id);
   e.storage.recoverStaleRuns(spec.campaign_id);
-  const b = e.storage.claimNextStepAsOwner(spec.campaign_id, "owner-b", 1)!;
+  const b = e.storage.claimNextStep(spec.campaign_id, ctrl, 1)!;
   assert.ok(b);
   assert.notEqual(b.run_id, a.run_id);
   const late = e.storage.finishRun(spec.campaign_id, a.run_id, {
@@ -1482,7 +1488,7 @@ test("F31 expired run A cannot finishRun over run B", async () => {
   const camp = e.storage.store.db
     .prepare("SELECT execute_lock_owner, execute_run_id FROM campaigns WHERE id = ?")
     .get(spec.campaign_id) as { execute_lock_owner: string; execute_run_id: string };
-  assert.equal(camp.execute_lock_owner, "owner-b");
+  assert.equal(camp.execute_lock_owner, "ctrl");
   assert.equal(camp.execute_run_id, b.run_id);
   assert.equal(e.storage.getRun(a.run_id).state, "lease_expired");
   e.close();

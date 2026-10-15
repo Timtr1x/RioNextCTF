@@ -529,6 +529,7 @@ test("success-predicate fact stays pending until a human accepts or rejects it",
     finish_requested: true,
     protocol_error: null,
   });
+  e.storage.releaseControllerLock("goal-human", "t", run.controller_generation);
   await e.runLoop("goal-human");
   assert.equal(e.storage.getCampaign("goal-human").state, "awaiting_verify");
   assert.throws(

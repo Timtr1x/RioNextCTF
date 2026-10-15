@@ -452,6 +452,9 @@ export class Engine {
       const camp = this.storage.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused" || camp.state === "awaiting_verify") break;
       const polled = await this.pollOperations(campaignId);
+      // Periodic reclamation, not only at start: revoke expired runs and settle
+      // persisted finishes so crashed workers cannot occupy slots forever (L18).
+      this.storage.recoverStaleRuns(campaignId);
       const ctrl = this.controllerLease(campaignId);
       if (!this.storage.heartbeatControllerLock(campaignId, ctrl.owner, ctrl.generation, this.config.run_lease_ms)) {
         // Ownership lost: stop refilling, abort local runs, leave the loop.
@@ -724,7 +727,10 @@ export class Engine {
       const ctrl = new AbortController();
       await worker.start(lease, ctx, ctrl.signal);
       const outcome = await worker.settle();
-      this.storage.finishRun(lease.campaign_id, lease.run_id, outcome);
+      this.storage.finishRun(lease.campaign_id, lease.run_id, outcome, {
+        fence: lease.fence,
+        controller_generation: lease.controller_generation,
+      });
       this.kali.closePlaywrightSession(this.kaliOptsForRun(lease));
       if (worker.modelGateway) this.modelSends += worker.modelGateway.modelSends;
       if (worker.toolGateway) {

@@ -137,6 +137,13 @@ export class ModelGateway {
     }
     if (String(run.state) !== "claimed" && String(run.state) !== "running") return "run_not_live";
     if (Number(run.fence) !== this.lease.fence) return "stale_fence";
+    if (run.controller_generation != null) {
+      // L09: the claiming controller generation must still hold the lock.
+      const lock = this.storage.store.db
+        .prepare("SELECT 1 FROM controller_locks WHERE campaign_id = ? AND generation = ? AND lease_until > ?")
+        .get(this.lease.campaign_id, Number(run.controller_generation), Date.now());
+      if (!lock) return "controller_lost";
+    }
     // Fresh DB deadline, not the snapshot taken when the lease was created.
     if (Date.now() > Number(run.deadline_ms)) return "lease_expired";
     return null;
@@ -163,12 +170,15 @@ export class ModelGateway {
         settle.neverSent(err instanceof QueueDeadlineError ? "lease_expired" : "queue_aborted");
         return errorStream(callModel, err instanceof QueueDeadlineError ? "lease_expired" : "queue_aborted");
       }
-      const deny = this.revalidateBeforeSend();
-      if (deny) {
-        permit.release();
-        settle.neverSent(deny);
-        return errorStream(callModel, deny);
-      }
+    }
+    // Whether or not a queue exists, revalidate against the database right
+    // before sending (H01 §3.4 step 4): a campaign paused/cancelled or a run
+    // reclaimed while we prepared/queued must never reach the provider.
+    const deny = this.revalidateBeforeSend();
+    if (deny) {
+      permit?.release();
+      settle.neverSent(deny);
+      return errorStream(callModel, deny);
     }
     this.invocations.mark(inv.id, "dispatching");
     this.invocations.mark(inv.id, "running");
