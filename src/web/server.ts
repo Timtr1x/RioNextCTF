@@ -45,6 +45,8 @@ export interface UiServerOptions {
   maxCycles?: number;
   /** Static + SPA fallback is skipped when false (tests that only exercise API). */
   serveStatic?: boolean;
+  /** CLI flags forwarded into runtime-config resolution (flags > env > runtime.json). */
+  flags?: Record<string, string | boolean>;
 }
 
 export interface UiServer {
@@ -133,7 +135,7 @@ function matchRoute(routes: Route[], method: string, path: string): { route: Rou
 }
 
 export async function startUiServer(options: UiServerOptions): Promise<UiServer> {
-  const host = new EngineHost(options.dataDir, { maxCycles: options.maxCycles });
+  const host = new EngineHost(options.dataDir, { maxCycles: options.maxCycles, flags: options.flags });
   const tasks = new TaskRegistry();
   const ops: OpsContext = { healthCache: { at: 0, value: null } };
   const routes: Route[] = [];

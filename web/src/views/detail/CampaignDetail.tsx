@@ -146,6 +146,17 @@ export function CampaignDetail({ id }: { id: string }): JSX.Element {
               : "idle"}
           {" · "}更新于 {fmtTime(view.updated_at)}
         </div>
+        {view.execution_capacity ? (
+          <div className="mini mt">
+            并行：请求 {view.execution_capacity.requested_workers} · 生效 {view.execution_capacity.effective_workers} · 宿主上限{" "}
+            {view.execution_capacity.runtime_limit_per_campaign}
+            {view.execution_capacity.recovering_slots > 0 ? ` · ${view.execution_capacity.recovering_slots} 槽恢复中` : ""}
+            {view.execution_capacity.waiting_reason ? ` · 等待：${view.execution_capacity.waiting_reason}` : ""}
+            {view.provider_capacity
+              ? ` · 模型在途 ${view.provider_capacity.active}/${view.provider_capacity.limit}（排队 ${view.provider_capacity.queued}）`
+              : ""}
+          </div>
+        ) : null}
       </div>
 
       <div className="tabs">

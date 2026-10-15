@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { Engine } from "../controller/engine.ts";
-import { makeRuntimeConfig } from "../contracts/config.ts";
+import { resolveRuntimeConfig, type RuntimeConfig } from "../contracts/config.ts";
 import { conflict } from "../domain/errors.ts";
+import { Semaphore } from "../gateway/semaphore.ts";
 
 export interface RunEntry {
   campaignId: string;
@@ -20,19 +21,30 @@ export interface RunEntry {
  * not cross-label provider sessions. Campaign engines are closed when the
  * run settles; the controller lock row is what protects against a second
  * process (CLI or ui) starting the same campaign.
+ *
+ * Runtime limits resolve once from the shared rules (runtime.json < env <
+ * flags) and every engine in this process shares one provider semaphore.
  */
 export class EngineHost {
   readonly control: Engine;
   private readonly runs = new Map<string, RunEntry>();
+  private readonly runtime: RuntimeConfig;
+  private readonly modelSemaphore: Semaphore;
 
   constructor(
     readonly dataDir: string,
-    private readonly options: { maxCycles?: number } = {},
+    private readonly options: { maxCycles?: number; flags?: Record<string, string | boolean> } = {},
   ) {
-    this.control = new Engine(makeRuntimeConfig(dataDir, `ui-${randomUUID().slice(0, 8)}`), {
-      maxCycles: options.maxCycles ?? 1000,
-      silent: true,
-    });
+    this.runtime = resolveRuntimeConfig(dataDir, options.flags ?? {});
+    this.modelSemaphore = new Semaphore(this.runtime.max_inflight_model_calls);
+    this.control = new Engine(
+      { ...this.runtime, instance_id: `ui-${randomUUID().slice(0, 8)}` },
+      {
+        maxCycles: options.maxCycles ?? 1000,
+        silent: true,
+        modelSemaphore: this.modelSemaphore,
+      },
+    );
   }
 
   running(campaignId: string): RunEntry | undefined {
@@ -51,10 +63,14 @@ export class EngineHost {
     this.control.storage.getCampaign(campaignId);
     this.assertNoLiveController(campaignId);
     const instanceId = `ui-run-${randomUUID().slice(0, 8)}`;
-    const engine = new Engine(makeRuntimeConfig(this.dataDir, instanceId), {
-      maxCycles: this.options.maxCycles ?? 1000,
-      silent: true,
-    });
+    const engine = new Engine(
+      { ...this.runtime, instance_id: instanceId },
+      {
+        maxCycles: this.options.maxCycles ?? 1000,
+        silent: true,
+        modelSemaphore: this.modelSemaphore,
+      },
+    );
     const entry: RunEntry = {
       campaignId,
       instanceId,
@@ -93,9 +109,10 @@ export class EngineHost {
 
   /**
    * Read-only pre-flight of the controller lock so the HTTP caller gets a
-   * synchronous 409 instead of an async runner death. Mirrors the stale
-   * rules in StorageService.acquireControllerLock; the runner's own acquire
-   * still does the authoritative take-over.
+   * synchronous 409 instead of an async runner death. Uses the same rule as
+   * StorageService.acquireControllerLock: lease_until <= now is expired; a
+   * pre-v2 row without lease_until falls back to heartbeat staleness. The
+   * runner's own acquire still does the authoritative take-over.
    */
   private assertNoLiveController(campaignId: string): void {
     const row = this.control.storage.store.db
@@ -103,11 +120,13 @@ export class EngineHost {
       .get(campaignId) as { owner: string; lease_until: number | null; heartbeat_at: string | null } | undefined;
     if (!row) return;
     const now = Date.now();
-    const leaseMs = this.control.config.lease_ttl_ms;
-    const expired = row.lease_until != null && Number(row.lease_until) < now;
-    const heartbeatMs = row.heartbeat_at ? Date.parse(row.heartbeat_at) : 0;
-    const staleHeartbeat = heartbeatMs > 0 && now - heartbeatMs > leaseMs;
-    if (!expired && !staleHeartbeat) {
+    const expired =
+      row.lease_until != null
+        ? Number(row.lease_until) <= now
+        : row.heartbeat_at
+          ? now - Date.parse(row.heartbeat_at) > this.control.config.lease_ttl_ms
+          : true;
+    if (!expired) {
       throw conflict("controller_lock_held", `another controller owns this campaign: ${row.owner}`, {
         owner: row.owner,
       });

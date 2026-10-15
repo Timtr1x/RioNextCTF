@@ -1423,6 +1423,23 @@ export class StorageService {
     return Boolean(row);
   }
 
+  /** Expired runs whose external calls are still unresolved still hold a slot. */
+  recoveringExecuteSlots(campaignId: string): number {
+    return this.store.transaction(() => {
+      this.revokeExpiredRunsTx(campaignId);
+      const now = Date.now();
+      return Number(
+        (this.store.db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM task_runs tr
+             WHERE tr.campaign_id = ? AND tr.mode = 'execute' AND tr.state = 'lease_expired'
+               AND EXISTS (SELECT 1 FROM invocations i WHERE i.run_id = tr.id AND i.state IN ('prepared','dispatching','running','uncertain'))`,
+          )
+          .get(campaignId) as { c: number }).c,
+      );
+    });
+  }
+
   /** Live plus recovering execute runs — the real slot occupation (I07). */
   private occupiedExecuteSlotsTx(campaignId: string): number {
     const now = Date.now();

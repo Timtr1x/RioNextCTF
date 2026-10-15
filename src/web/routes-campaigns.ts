@@ -57,6 +57,8 @@ interface CreateBody {
   hint?: string;
   id?: string;
   start?: boolean;
+  /** Requested execute workers for this campaign (1-8); persists in the spec. */
+  workers?: number;
 }
 
 function uploadDir(dataDir: string, uploadId: string): string {
@@ -114,7 +116,14 @@ async function createCampaign(ctx: ApiContext): Promise<unknown> {
     loaded = specFromInput(source, ctx.dataDir, body.id);
   }
 
-  const spec = loaded.spec as { campaign_id?: string };
+  const spec = loaded.spec as { campaign_id?: string; execution_policy?: { max_execute_workers?: number } };
+  if (body.workers !== undefined) {
+    const n = Number(body.workers);
+    if (!Number.isSafeInteger(n) || n < 1 || n > 8) {
+      throw invalidInput("workers", `workers must be an integer between 1 and 8, got ${String(body.workers)}`);
+    }
+    spec.execution_policy = { ...spec.execution_policy, max_execute_workers: n };
+  }
   let created = false;
   try {
     engine.createCampaign(loaded.spec);

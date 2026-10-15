@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { RuntimeConfig } from "../contracts/config.ts";
-import { configFingerprint, makeRuntimeConfig, printStartupBanner, validateStartupInput } from "../contracts/config.ts";
+import { configFingerprint, makeRuntimeConfig, printStartupBanner, resolveRuntimeConfig, validateStartupInput } from "../contracts/config.ts";
 import { buildContextPack } from "../context/builder.ts";
 import { evaluateCompletion, completeCoverageRequired, confirmedFindingsRequired, goalFactCanSatisfy, requiresIndependentGoalVerification, type CompletionSnapshot, type CoverageRow } from "../domain/completion.ts";
 import { DomainError } from "../domain/errors.ts";
@@ -887,6 +887,28 @@ export class Engine {
     }));
     const ops = this.storage.listOperations(campaignId);
     const opsOpen = ops.filter((o) => !["completed", "failed"].includes(String(o.state))).length;
+    const requestedWorkers = Math.max(1, Math.min(8, camp.spec.execution_policy?.max_execute_workers ?? 1));
+    const runtimeLimit = this.config.max_concurrent_execute;
+    const effectiveWorkers = Math.min(requestedWorkers, runtimeLimit);
+    const activeExecute = activeRuns.filter((r) => r.mode === "execute").length;
+    const recoveringSlots = this.storage.recoveringExecuteSlots(campaignId);
+    const decideLive = activeRuns.some((r) => r.mode === "decide");
+    const waiting_reason =
+      camp.state !== "active" && camp.state !== "created"
+        ? `campaign_${camp.state}`
+        : recoveringSlots > 0
+          ? "unresolved_previous_execution"
+          : decideLive
+            ? "boundary_review"
+            : activeExecute >= effectiveWorkers
+              ? requestedWorkers > runtimeLimit
+                ? "runtime_limit"
+                : "capacity_full"
+              : this.modelSem.queued > 0
+                ? "provider_queue"
+                : counts.ready === 0
+                  ? "no_ready_step"
+                  : null;
     const residual = uncertain
       .filter((u) => String(u.execution_id ?? "").startsWith("kali_") || String(u.effect_class) === "unknown")
       .map((u) => ({
@@ -909,10 +931,48 @@ export class Engine {
       uncertain_invocations: uncertain,
       operations_open: opsOpen,
       residual,
+      execution_capacity: {
+        requested_workers: requestedWorkers,
+        runtime_limit_per_campaign: runtimeLimit,
+        effective_workers: effectiveWorkers,
+        active_runs: activeExecute,
+        recovering_slots: recoveringSlots,
+        waiting_reason,
+      },
+      provider_capacity: {
+        scope: "service_process",
+        limit: this.config.max_inflight_model_calls,
+        active: this.modelSem.active,
+        queued: this.modelSem.queued,
+      },
       pending_goal_claim: this.storage.pendingGoalClaim(campaignId),
       root_goal_satisfied: rootGoalSatisfied(camp.spec, this.storage, campaignId, this.storage.getWorld<LabWorld>(campaignId, freshWorld())),
       finalization: this.storage.finalizationStats(campaignId),
     };
+  }
+
+  /**
+   * Control-plane update of the requested worker count. A campaign with a live
+   * controller is running and refuses: pause, wait for the boundary, retry.
+   * Records execution.policy_changed so the change is explainable later.
+   */
+  setExecutionWorkers(campaignId: string, workers: number): void {
+    if (!Number.isSafeInteger(workers) || workers < 1 || workers > 8) {
+      throw new DomainError("workers", `workers must be an integer between 1 and 8, got ${workers}`, "invalid_input");
+    }
+    const camp = this.storage.getCampaign(campaignId);
+    const lock = this.storage.store.db
+      .prepare("SELECT lease_until FROM controller_locks WHERE campaign_id = ?")
+      .get(campaignId) as { lease_until: number | null } | undefined;
+    if (lock && lock.lease_until != null && Number(lock.lease_until) > Date.now()) {
+      throw new DomainError("campaign_running", "campaign is running; pause it and retry at the boundary", "conflict");
+    }
+    const spec = camp.spec;
+    spec.execution_policy = { ...spec.execution_policy, max_execute_workers: workers };
+    this.storage.store.db
+      .prepare("UPDATE campaigns SET spec_json = ?, epoch = epoch + 1, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(spec), new Date().toISOString(), campaignId);
+    this.storage.appendEvent(campaignId, "execution.policy_changed", { max_execute_workers: workers }, { kind: "user", id: "cli" });
   }
 
   async backupTo(destDir: string): Promise<BackupReport> {
@@ -1012,6 +1072,9 @@ function boundedConclusion(spec: CampaignSpec, world: LabWorld, coverage: Record
   return `In scope ${spec.scope.profile}, env ${world.env_rev}: sample not recovered. No statement that the world is safe.`;
 }
 
-export function openEngine(dataDir: string, options?: EngineOptions): Engine {
-  return new Engine(makeRuntimeConfig(dataDir, `local-${randomUUID().slice(0, 8)}`), options);
+export function openEngine(dataDir: string, options?: EngineOptions, flags?: Record<string, string | boolean>): Engine {
+  return new Engine(
+    { ...resolveRuntimeConfig(dataDir, flags ?? {}), instance_id: `local-${randomUUID().slice(0, 8)}` },
+    options,
+  );
 }

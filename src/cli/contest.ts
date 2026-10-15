@@ -12,11 +12,12 @@ import { SharedKali } from "../contest/shared-kali.ts";
 import { ContestSupervisor, type SlotInfo } from "../contest/supervisor.ts";
 import { ProviderCatalog } from "../provider/catalog.ts";
 import { resolveSlot } from "../provider/router.ts";
+import { parseWorkersFlag } from "../contracts/config.ts";
 import { flagString } from "./args.ts";
 
 export const CONTEST_HELP = `RioNext contest mode (春秋 AI 智能体解题赛)
 
-  rionext contest run --mode test|official --token-file ./token.txt [--slots 4]
+  rionext contest run --mode test|official --token-file ./token.txt [--slots 4] [--workers 1]
   rionext contest status
   rionext contest stop
   rionext contest reset <question_id> --token-file ./token.txt
@@ -27,7 +28,10 @@ All slot campaigns share ONE Kali container (rionext-kali-contest).
 
   --mode test       mock/测试 questions are accepted (drill the full loop)
   --mode official   mock/测试 questions are filtered out
-  --slots 4         max parallel campaigns (1-8)
+  --slots 4         max question campaigns in flight at once (1-8)
+  --workers 1       execute workers per question campaign (1-8). slots x workers
+                    share this process's provider cap (max_inflight_model_calls)
+                    and the campaign total budget never grows with workers.
   --max-cycles 1000 controller cycles per campaign
 
 Flag flow: a campaign flag claim is submitted to the platform automatically.
@@ -168,9 +172,12 @@ export async function handleContestCommand(
 
   const api = new ContestApi({ token, onLog: log });
   const shared = { name: SHARED_CONTAINER_NAME, mountHost: join(dir, "workspace") };
+  const workers = parseWorkersFlag(flags) ?? undefined;
   const factory = new EngineRunnerFactory(dir, {
     maxCycles: Number(flags["max-cycles"] ?? 1000) || 1000,
     shared,
+    workers,
+    flags,
     onLog: log,
   });
   const sharedKali = new SharedKali({ name: shared.name, mountHost: shared.mountHost, dataDir: dir, onLog: log });

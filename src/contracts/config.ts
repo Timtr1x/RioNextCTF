@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { validateCampaignSpec } from "../domain/spec.ts";
 import { invalidInput } from "../domain/errors.ts";
 import type { CampaignSpec } from "../domain/types.ts";
@@ -99,6 +101,78 @@ export function applyExecuteLimitFlags(
   const tools = parsePositiveIntFlag(flags, "max-tool-calls");
   if (tools != null) runtime.max_tool_calls_per_run = tools;
   return runtime;
+}
+
+/** Fields a data-dir runtime.json may carry. Secrets never belong there. */
+const RUNTIME_FILE_KEYS = ["max_concurrent_execute", "max_inflight_model_calls"] as const;
+
+function parsePositiveIntValue(raw: unknown, source: string, key: string): number {
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    throw invalidInput(key, `${source}: ${key} must be a positive safe integer, got ${String(raw)}`);
+  }
+  return n;
+}
+
+/**
+ * The single runtime-config resolution every entry point (CLI run/ui/contest,
+ * web EngineHost) shares (H05 §7.3). Priority: explicit CLI flags >
+ * environment > <dataDir>/runtime.json > DEFAULT_RUNTIME. Unknown runtime.json
+ * keys, broken JSON, and illegal values all fail loudly — never silently fall
+ * back to 1.
+ */
+export function resolveRuntimeConfig(
+  dataDir: string,
+  flags: Record<string, string | boolean> = {},
+  env: NodeJS.ProcessEnv = process.env,
+): RuntimeConfig {
+  const cfg = makeRuntimeConfig(dataDir);
+  const filePath = join(dataDir, "runtime.json");
+  if (existsSync(filePath)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(filePath, "utf8"));
+    } catch (err) {
+      throw invalidInput("runtime_config", `runtime.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw invalidInput("runtime_config", "runtime.json must be a JSON object");
+    }
+    for (const key of Object.keys(parsed as Record<string, unknown>)) {
+      if (!(RUNTIME_FILE_KEYS as readonly string[]).includes(key)) {
+        throw invalidInput("runtime_config", `runtime.json key not allowed: ${key} (allowed: ${RUNTIME_FILE_KEYS.join(", ")})`);
+      }
+    }
+    const obj = parsed as Record<string, unknown>;
+    if (obj.max_concurrent_execute != null) {
+      cfg.max_concurrent_execute = parsePositiveIntValue(obj.max_concurrent_execute, "runtime.json", "max_concurrent_execute");
+    }
+    if (obj.max_inflight_model_calls != null) {
+      cfg.max_inflight_model_calls = parsePositiveIntValue(obj.max_inflight_model_calls, "runtime.json", "max_inflight_model_calls");
+    }
+  }
+  if (env.RIONEXT_MAX_CONCURRENT_EXECUTE != null && env.RIONEXT_MAX_CONCURRENT_EXECUTE !== "") {
+    cfg.max_concurrent_execute = parsePositiveIntValue(env.RIONEXT_MAX_CONCURRENT_EXECUTE, "RIONEXT_MAX_CONCURRENT_EXECUTE", "max_concurrent_execute");
+  }
+  if (env.RIONEXT_MAX_INFLIGHT_MODEL_CALLS != null && env.RIONEXT_MAX_INFLIGHT_MODEL_CALLS !== "") {
+    cfg.max_inflight_model_calls = parsePositiveIntValue(env.RIONEXT_MAX_INFLIGHT_MODEL_CALLS, "RIONEXT_MAX_INFLIGHT_MODEL_CALLS", "max_inflight_model_calls");
+  }
+  const flagExecute = parsePositiveIntFlag(flags, "max-concurrent-execute");
+  if (flagExecute != null) cfg.max_concurrent_execute = flagExecute;
+  const flagModel = parsePositiveIntFlag(flags, "max-inflight-model-calls");
+  if (flagModel != null) cfg.max_inflight_model_calls = flagModel;
+  return cfg;
+}
+
+/** The requested per-campaign worker count: spec.execution_policy. 1-8. */
+export function parseWorkersFlag(flags: Record<string, string | boolean>): number | null {
+  if (!("workers" in flags)) return null;
+  const raw = flags.workers;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1 || n > 8) {
+    throw invalidInput("workers", `--workers must be an integer between 1 and 8, got ${String(raw)}`);
+  }
+  return n;
 }
 
 function parsePositiveIntFlag(flags: Record<string, string | boolean>, key: string): number | null {

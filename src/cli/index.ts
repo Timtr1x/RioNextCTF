@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { applyExecuteLimitFlags, applyFinalizationFlags, makeRuntimeConfig } from "../contracts/config.ts";
+import { applyExecuteLimitFlags, applyFinalizationFlags, parseWorkersFlag, resolveRuntimeConfig } from "../contracts/config.ts";
 import { Engine, restoreEngineData } from "../controller/engine.ts";
 import { DomainError } from "../domain/errors.ts";
 import { runReactBaseline } from "../eval/baseline-react.ts";
@@ -50,6 +50,22 @@ async function runCampaign(engine: Engine, id: string, flags: Record<string, str
   }
 }
 
+/** --workers N writes the requested per-campaign execute count into the spec
+ *  before creation; it persists in execution_policy (U01/U04). */
+function applyWorkersToSpec(spec: unknown, workers: number): void {
+  const s = spec as { execution_policy?: { max_execute_workers?: number } };
+  s.execution_policy = { ...s.execution_policy, max_execute_workers: workers };
+}
+
+/**
+ * --workers on start: update the persisted request through the control plane.
+ * A running campaign (live controller) refuses: pause it, wait for the
+ * boundary, then start with the new value (U11).
+ */
+function updateExecutionPolicy(engine: Engine, id: string, workers: number): void {
+  engine.setExecutionWorkers(id, workers);
+}
+
 function printHelp(topic?: string): void {  if (topic === "provider" || topic === "providers") {
     console.log(PROVIDER_HELP);
     return;
@@ -91,6 +107,21 @@ async function main(): Promise<void> {
   const json = Boolean(flags.json);
   if (flags.help || cmd === "--help" || cmd === "-h") {
     printHelp(positional[0] ?? (cmd === "provider" || cmd === "providers" ? "provider" : cmd === "kali" ? "kali" : undefined));
+    return;
+  }
+  // --workers is honored by run/create/start/contest only; elsewhere it must
+  // fail loudly instead of being silently ignored (U12).
+  let workers: number | null = null;
+  try {
+    workers = parseWorkersFlag(flags);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 2;
+    return;
+  }
+  if (workers != null && !["run", "create", "start", "contest"].includes(String(cmd))) {
+    console.error(`--workers is not supported for ${String(cmd)}; use it with run/create/start/contest`);
+    process.exitCode = 2;
     return;
   }
   if (cmd === "help" && typeof flags.url === "string") cmd = "run";
@@ -141,10 +172,14 @@ async function main(): Promise<void> {
   if (cmd === "ui" || cmd === "web" || cmd === "serve") {
     const port = flags.port ? Number(flags.port) : 7780;
     const { startUiServer } = await import("../web/server.ts");
+    // Resolve runtime limits before serving: a broken runtime.json fails the
+    // command here, not after the port is open.
+    resolveRuntimeConfig(dir, flags);
     const ui = await startUiServer({
       dataDir: dir,
       port,
       maxCycles: flags["max-cycles"] ? Number(flags["max-cycles"]) : 1000,
+      flags,
     });
     console.log(`rionext ui ${ui.url}  data ${dir}`);
     console.log("campaigns started here run inside this process; Ctrl+C stops the server, not the data");
@@ -193,7 +228,7 @@ async function main(): Promise<void> {
   }
   let cfg;
   try {
-    cfg = applyExecuteLimitFlags(applyFinalizationFlags(makeRuntimeConfig(dir), flags), flags);
+    cfg = applyExecuteLimitFlags(applyFinalizationFlags(resolveRuntimeConfig(dir, flags), flags), flags);
   } catch (err) {
     if (err instanceof DomainError) {
       console.error(`${err.code}: ${err.message}`);
@@ -219,6 +254,7 @@ async function main(): Promise<void> {
     if (cmd === "run") {
       const loaded = await loadCampaignSpec(flags, positional, dir);
       const spec = loaded.spec as { campaign_id?: string };
+      if (workers != null) applyWorkersToSpec(spec, workers);
       let created = false;
       try {
         engine.createCampaign(spec);
@@ -236,6 +272,7 @@ async function main(): Promise<void> {
     }
     if (cmd === "create") {
       const loaded = await loadCampaignSpec(flags, positional, dir);
+      if (workers != null) applyWorkersToSpec(loaded.spec, workers);
       const rec = engine.createCampaign(loaded.spec);
       if (loaded.seed) seedChallengeStep(engine.storage, rec.id, loaded.seed);
       emit({ created: rec.id, state: rec.state, started: false }, json, `created ${rec.id}  ${rec.state}`);
@@ -257,6 +294,7 @@ async function main(): Promise<void> {
     const id = needsId ? resolveCampaignId(flags, positional, engine.listCampaigns()) : "";
     switch (cmd) {
       case "start": {
+        if (workers != null) updateExecutionPolicy(engine, id, workers);
         await runCampaign(engine, id, flags, json);
         const st = engine.status(id);
         emit(st, json, formatStatus(st));

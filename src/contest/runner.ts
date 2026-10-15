@@ -58,6 +58,10 @@ export interface EngineRunnerOptions {
   maxCycles?: number;
   /** Shared-container mode: all campaigns exec into this one container. */
   shared?: { name: string; mountHost: string };
+  /** Requested execute workers per question campaign (1-8, default 1). */
+  workers?: number;
+  /** CLI flags for runtime-config resolution (host limits). */
+  flags?: Record<string, string | boolean>;
   fetchFn?: FetchLike;
   downloadTimeoutMs?: number;
   onLog?: (line: string) => void;
@@ -177,9 +181,14 @@ export class EngineRunnerFactory implements RunnerFactory {
     this.opts.onLog?.(line);
   }
 
+  /** Read access to the control engine's storage (tests and status tooling). */
+  controlStorage(): Engine["storage"] {
+    return this.controlEngineGet().storage;
+  }
+
   private controlEngineGet(): Engine {
     if (!this.controlEngine) {
-      this.controlEngine = openEngine(this.contestDir, { silent: true, maxCycles: this.opts.maxCycles ?? 1000, modelSemaphore: this.modelSemaphore });
+      this.controlEngine = openEngine(this.contestDir, { silent: true, maxCycles: this.opts.maxCycles ?? 1000, modelSemaphore: this.modelSemaphore }, this.opts.flags);
     }
     return this.controlEngine;
   }
@@ -209,6 +218,10 @@ export class EngineRunnerFactory implements RunnerFactory {
         id,
         { containerRoot: this.opts.shared ? `/workspace/${id}` : undefined },
       );
+    }
+    if (this.opts.workers != null) {
+      const spec = loaded.spec as { execution_policy?: { max_execute_workers?: number } };
+      spec.execution_policy = { ...spec.execution_policy, max_execute_workers: this.opts.workers };
     }
     engine.createCampaign(loaded.spec);
     if (loaded.seed) seedChallengeStep(engine.storage, id, loaded.seed);

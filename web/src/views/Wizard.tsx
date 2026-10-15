@@ -20,6 +20,7 @@ interface WzState {
   webUrl: string;
   hint: string;
   specText: string;
+  workers: number;
 }
 
 const INIT: WzState = {
@@ -34,6 +35,7 @@ const INIT: WzState = {
   webUrl: "",
   hint: "",
   specText: "",
+  workers: 1,
 };
 
 export function Wizard({ onClose, initialSource }: { onClose: () => void; initialSource?: Source | null }): JSX.Element {
@@ -54,6 +56,7 @@ export function Wizard({ onClose, initialSource }: { onClose: () => void; initia
     setBusy(true);
     try {
       const body: Record<string, unknown> = { start: true };
+      if (wz.workers > 1) body.workers = wz.workers;
       let cli = "";
       if (wz.source === "url") {
         body.url = wz.url.trim();
@@ -103,7 +106,7 @@ export function Wizard({ onClose, initialSource }: { onClose: () => void; initia
         </div>
         {step === 1 && <Step1 wz={wz} setWz={setWz} triage={triage} setTriage={setTriage} />}
         {step === 2 && <Step2 wz={wz} solver={solver} />}
-        {step === 3 && <Step3 wz={wz} solver={solver} triage={triage} />}
+        {step === 3 && <Step3 wz={wz} setWz={setWz} solver={solver} triage={triage} />}
         <div className="flex mt">
           {step > 1 ? (
             <button className="ghost" onClick={() => setStep(step - 1)}>
@@ -477,7 +480,7 @@ function Step2({ wz, solver }: { wz: WzState; solver: string }): JSX.Element {
   );
 }
 
-function Step3({ wz, solver, triage }: { wz: WzState; solver: string; triage: TriagePreview | null }): JSX.Element {
+function Step3({ wz, setWz, solver, triage }: { wz: WzState; setWz: React.Dispatch<React.SetStateAction<WzState>>; solver: string; triage: TriagePreview | null }): JSX.Element {
   const summary = useMemo(() => {
     if (wz.source === "url") return { entry: `--url ${wz.url}`, id: wz.id || "按 host 生成" };
     if (wz.source === "input")
@@ -508,6 +511,18 @@ function Step3({ wz, solver, triage }: { wz: WzState; solver: string; triage: Tr
       <div className="kv">
         <span className="k">solver</span>
         <span>{solver}</span>
+      </div>
+      <div className="kv">
+        <span className="k">并行 Worker</span>
+        <span>
+          <select
+            value={wz.workers}
+            onChange={(e) => setWz((w) => ({ ...w, workers: Number(e.target.value) }))}
+          >
+            <option value={1}>1（默认，串行）</option>
+            <option value={2}>2（两个 Execute 并行；受宿主上限与总预算约束）</option>
+          </select>
+        </span>
       </div>
       {triage ? (
         <div className="flex mt">

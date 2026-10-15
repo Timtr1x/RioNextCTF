@@ -92,6 +92,15 @@ export interface CampaignView {
   state: string;
   active_run: { id: string; mode: string; state: string } | null;
   active_runs?: { id: string; mode: string; state: string; step_id: string | null }[];
+  execution_capacity?: {
+    requested_workers: number;
+    runtime_limit_per_campaign: number;
+    effective_workers: number;
+    active_runs: number;
+    recovering_slots: number;
+    waiting_reason: string | null;
+  };
+  provider_capacity?: { scope: string; limit: number; active: number; queued: number };
   candidates_ready: number;
   blocked: number;
   budget: BudgetSnapshot;
