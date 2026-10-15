@@ -6,22 +6,57 @@ import { chromium } from "playwright";
 const PORT = 18765;
 
 let browser;
+/** One launch in flight at a time: concurrent first-uses join the same promise. */
+let browserLaunch = null;
 /** Per-run browser state: context + page + ref map + screenshot path. */
 const sessions = new Map();
+/** Per-run session creation in flight: two simultaneous first-ops for one run
+ *  must not build two BrowserContexts. */
+const sessionStarts = new Map();
+
+async function ensureBrowser() {
+  if (browser) return browser;
+  if (!browserLaunch) {
+    browserLaunch = chromium
+      .launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-extensions"],
+      })
+      .then(
+        (b) => {
+          browser = b;
+          return b;
+        },
+        (err) => {
+          browserLaunch = null; // a failed launch must not poison later retries
+          throw err;
+        },
+      );
+  }
+  return browserLaunch;
+}
 
 async function ensurePage(sessionId) {
-  if (!browser) {
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-extensions"],
-    });
-  }
+  const b = await ensureBrowser();
   let s = sessions.get(sessionId);
   if (!s) {
-    const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 720 } });
-    const page = await context.newPage();
-    s = { context, page, refs: new Map() };
-    sessions.set(sessionId, s);
+    let starting = sessionStarts.get(sessionId);
+    if (!starting) {
+      starting = (async () => {
+        const context = await b.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 720 } });
+        const page = await context.newPage();
+        return { context, page, refs: new Map() };
+      })();
+      sessionStarts.set(sessionId, starting);
+      try {
+        s = await starting;
+        sessions.set(sessionId, s);
+      } finally {
+        sessionStarts.delete(sessionId);
+      }
+    } else {
+      s = await starting;
+    }
   }
   if (!s.page || s.page.isClosed()) s.page = await s.context.newPage();
   return s;

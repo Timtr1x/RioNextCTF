@@ -24,6 +24,7 @@ class RecordingDocker {
   }
   run(argv: string[], _opts?: DockerRunOpts): DockerExecResult {
     this.calls.push(argv);
+    if (argv[0] === "inspect" && argv.some((a) => a.includes("Config.Labels"))) return { ...okResult(), stdout: '{"rionext.from":"master"}' };
     if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) return { ...okResult(), stdout: "true\n" };
     if (argv[0] === "image") return { ...okResult(), stdout: "sha256:fake\n" };
     return okResult();

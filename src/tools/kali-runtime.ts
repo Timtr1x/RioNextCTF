@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DomainError } from "../domain/errors.ts";
+import { hashJson } from "../domain/fingerprint.ts";
+import { ContainerInitCoordinator, processInitCoordinator } from "./container-init.ts";
 import type { DockerCli, DockerExecResult } from "./docker-cli.ts";
 import { ProcessDockerCli } from "./docker-cli.ts";
 import { checkEgress, checkRedirect, isLoopbackHost, parseAllowList, parseDestination, type AllowEntry, type ResolveFn } from "./egress.ts";
@@ -59,6 +61,8 @@ export interface ContainerSpec {
   env: Record<string, string>;
   network: string;
   image: string;
+  /** Config identity: same container name + different fingerprint is a conflict. */
+  fingerprint: string;
 }
 
 export function containerName(campaignId: string): string {
@@ -162,8 +166,23 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
   for (const [k, v] of Object.entries(env)) {
     argv.push("-e", `${k}=${v}`);
   }
+  // The fingerprint pins the config identity of this container name: image,
+  // mounts, network and the security-relevant limits. Two different configs
+  // sharing one name is an explicit conflict, never a silent rebuild. The
+  // --workdir is intentionally excluded: for shared containers it is the first
+  // creator's per-campaign root, while every exec passes its own -w anyway.
+  const fingerprint = hashJson({
+    image: opts.image ?? KALI_IMAGE,
+    network,
+    mountHost: dockerVolumePath(mountHost),
+    memory: opts.limits?.memory ?? DEFAULT_KALI_LIMITS.memory,
+    cpus: opts.limits?.cpus ?? DEFAULT_KALI_LIMITS.cpus,
+    pids: DEFAULT_KALI_LIMITS.pids,
+    entrypoint: Boolean(entrypointHost),
+  });
   argv.push("--label", `rionext.campaign=${opts.campaignId}`);
   argv.push("--label", "rionext.from=master");
+  argv.push("--label", `rionext.fp=${fingerprint}`);
   if (entrypointHost) {
     argv.push(opts.image ?? KALI_IMAGE, "/usr/local/bin/rionext-entrypoint", "sleep", "infinity");
   } else {
@@ -171,7 +190,7 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
   }
   assertNoSecretEnv(env);
   assertMountsSafe(mounts, forbidden);
-  return { name, argv, mounts, env, network, image: opts.image ?? KALI_IMAGE };
+  return { name, argv, mounts, env, network, image: opts.image ?? KALI_IMAGE, fingerprint };
 }
 
 export function collectAllowIps(assets: string[], resolve: ResolveFn): string[] {
@@ -351,9 +370,11 @@ export class KaliRuntime {
   private readonly last = new Map<string, DockerExecResult & { truncated: boolean; container: string }>();
 
   private readonly docker: DockerCli;
+  private readonly coordinator: ContainerInitCoordinator;
 
-  constructor(docker?: DockerCli) {
+  constructor(docker?: DockerCli, coordinator?: ContainerInitCoordinator) {
     this.docker = docker ?? new ProcessDockerCli();
+    this.coordinator = coordinator ?? processInitCoordinator;
   }
 
   takeLast(campaignId: string): (DockerExecResult & { truncated: boolean; container: string }) | undefined {
@@ -398,22 +419,76 @@ export class KaliRuntime {
   ensure(opts: KaliStartOpts): ContainerSpec {
     this.requireMasterImage(opts.image ?? KALI_IMAGE);
     const spec = this.spec(opts);
-    const inspect = this.docker.run(["inspect", "-f", "{{.State.Running}}", spec.name], { timeoutMs: 5_000 });
-    if (inspect.code === 0 && inspect.stdout.trim() === "true") return spec;
-    this.docker.run(["rm", "-f", spec.name], { timeoutMs: 10_000 });
+    const key = spec.name;
+    const fp = spec.fingerprint;
+    const verified = this.coordinator.verifiedFingerprint(key);
+    if (verified != null && verified !== fp) throw initConflict(key);
+    // A worker-path init may be running in this process: wait it out, then reuse.
+    for (let i = 0; i < 600 && this.coordinator.inFlight(key); i += 1) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+    if (this.inspectRunningSync(key)) {
+      if (verified === fp) return spec;
+      this.verifyOwnedMatchSync(key, spec);
+      this.coordinator.markVerified(key, fp);
+      return spec;
+    }
+    const lock = acquireInitLock(opts.dataDir, key, fp);
+    if (!lock) {
+      const reused = this.awaitPeerInitSync(opts.dataDir, key, spec);
+      if (reused) {
+        this.coordinator.markVerified(key, fp);
+        return spec;
+      }
+      throw new DomainError("kali_init_locked", `container ${key} is being initialized by another process`, "protocol_error");
+    }
+    try {
+      return this.createExclusiveSync(spec);
+    } finally {
+      lock.release();
+    }
+  }
+
+  private createExclusiveSync(spec: ContainerSpec): ContainerSpec {
+    const key = spec.name;
+    const fp = spec.fingerprint;
+    // Re-inspect under the lock: a peer may have finished while we waited.
+    if (this.inspectRunningSync(key)) {
+      this.verifyOwnedMatchSync(key, spec);
+      this.coordinator.markVerified(key, fp);
+      return spec;
+    }
+    const state = this.inspectStateAndLabelsSync(key);
+    if (state.exists && !state.running) {
+      // Exited container: only ever remove one this project owns (K10).
+      if (!ownedByThisProject(state.labels)) throw foreignConflict(key);
+      this.docker.run(["rm", "-f", key], { timeoutMs: 10_000 });
+      this.coordinator.invalidate(key);
+    }
     const created = this.docker.run(spec.argv, { timeoutMs: 30_000 });
     if (created.code !== 0) {
+      if (/already in use|Conflict/i.test(created.stderr)) {
+        // Lost a create race: reconcile by inspection, never rm -f.
+        this.verifyOwnedMatchSync(key, spec);
+        if (this.inspectRunningSync(key)) {
+          this.coordinator.markVerified(key, fp);
+          return spec;
+        }
+      }
       throw new DomainError("kali_start", created.stderr || "docker run failed", "protocol_error");
     }
     for (let i = 0; i < 25; i++) {
-      const ready = this.docker.run(["inspect", "-f", "{{.State.Running}}", spec.name], { timeoutMs: 5_000 });
-      if (ready.code === 0 && ready.stdout.trim() === "true") return spec;
+      if (this.inspectRunningSync(key)) {
+        this.verifyOwnedMatchSync(key, spec);
+        this.coordinator.markVerified(key, fp);
+        return spec;
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
     }
-    const died = this.docker.run(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", spec.name], { timeoutMs: 5_000 });
+    const died = this.docker.run(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", key], { timeoutMs: 5_000 });
     throw new DomainError(
       "kali_start",
-      `campaign container ${spec.name} exited before exec (${died.stdout.trim() || "missing"})`,
+      `campaign container ${key} exited before exec (${died.stdout.trim() || "missing"})`,
       "protocol_error",
     );
   }
@@ -521,24 +596,157 @@ export class KaliRuntime {
   private async ensureAsync(opts: KaliStartOpts, signal?: AbortSignal): Promise<ContainerSpec> {
     this.requireMasterImage(opts.image ?? KALI_IMAGE);
     const spec = this.spec(opts);
-    const inspect = await this.docker.runAsync(["inspect", "-f", "{{.State.Running}}", spec.name], { timeoutMs: 5_000, signal });
-    if (inspect.code === 0 && inspect.stdout.trim() === "true") return spec;
-    await this.docker.runAsync(["rm", "-f", spec.name], { timeoutMs: 10_000, signal });
-    const created = await this.docker.runAsync(spec.argv, { timeoutMs: 30_000, signal });
-    if (created.code !== 0) {
-      throw new DomainError("kali_start", created.stderr || "docker run failed", "protocol_error");
+    const key = spec.name;
+    const fp = spec.fingerprint;
+    const verified = this.coordinator.verifiedFingerprint(key);
+    if (verified != null && verified !== fp) throw initConflict(key);
+    if (await this.inspectRunningAsync(key, signal)) {
+      // Fast path: verified once per process, one inspect per exec afterwards.
+      if (verified === fp) return spec;
+      await this.verifyOwnedMatchAsync(key, spec);
+      this.coordinator.markVerified(key, fp);
+      return spec;
     }
-    for (let i = 0; i < 25; i++) {
-      const ready = await this.docker.runAsync(["inspect", "-f", "{{.State.Running}}", spec.name], { timeoutMs: 5_000, signal });
-      if (ready.code === 0 && ready.stdout.trim() === "true") return spec;
+    // Cold path: one creator per container name per process; the rest join.
+    // The creator runs without the caller's signal so one worker cancelling
+    // cannot fail its peers; each waiter cancels only its own wait (K05).
+    const joined = this.coordinator.join(key, fp, () => this.createExclusiveAsync(opts, spec));
+    if (!signal) return joined;
+    if (signal.aborted) throw new DomainError("cancelled", "init wait cancelled", "cancelled");
+    return Promise.race([
+      joined,
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DomainError("cancelled", "init wait cancelled", "cancelled")), {
+          once: true,
+        });
+      }),
+    ]);
+  }
+
+  private async createExclusiveAsync(opts: KaliStartOpts, spec: ContainerSpec): Promise<ContainerSpec> {
+    const key = spec.name;
+    const fp = spec.fingerprint;
+    const lock = acquireInitLock(opts.dataDir, key, fp);
+    if (!lock) {
+      // Another process is initializing: wait for the container to appear.
+      const reused = await this.awaitPeerInitAsync(opts.dataDir, key, spec);
+      if (reused) {
+        this.coordinator.markVerified(key, fp);
+        return spec;
+      }
+      throw new DomainError("kali_init_locked", `container ${key} is being initialized by another process`, "protocol_error");
+    }
+    try {
+      if (await this.inspectRunningAsync(key)) {
+        await this.verifyOwnedMatchAsync(key, spec);
+        this.coordinator.markVerified(key, fp);
+        return spec;
+      }
+      const state = await this.inspectStateAndLabelsAsync(key);
+      if (state.exists && !state.running) {
+        if (!ownedByThisProject(state.labels)) throw foreignConflict(key);
+        await this.docker.runAsync(["rm", "-f", key], { timeoutMs: 10_000 });
+        this.coordinator.invalidate(key);
+      }
+      const created = await this.docker.runAsync(spec.argv, { timeoutMs: 30_000 });
+      if (created.code !== 0) {
+        if (/already in use|Conflict/i.test(created.stderr)) {
+          // Lost a create race: reconcile by inspection, never rm -f (K09).
+          await this.verifyOwnedMatchAsync(key, spec);
+          if (await this.inspectRunningAsync(key)) {
+            this.coordinator.markVerified(key, fp);
+            return spec;
+          }
+        }
+        throw new DomainError("kali_start", created.stderr || "docker run failed", "protocol_error");
+      }
+      for (let i = 0; i < 25; i++) {
+        if (await this.inspectRunningAsync(key)) {
+          await this.verifyOwnedMatchAsync(key, spec);
+          this.coordinator.markVerified(key, fp);
+          return spec;
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      const died = await this.docker.runAsync(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", key], { timeoutMs: 5_000 });
+      throw new DomainError(
+        "kali_start",
+        `campaign container ${key} exited before exec (${died.stdout.trim() || "missing"})`,
+        "protocol_error",
+      );
+    } finally {
+      lock.release();
+    }
+  }
+
+  private async inspectRunningAsync(name: string, signal?: AbortSignal): Promise<boolean> {
+    const r = await this.docker.runAsync(["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 5_000, signal });
+    return r.code === 0 && r.stdout.trim() === "true";
+  }
+
+  private inspectRunningSync(name: string): boolean {
+    const r = this.docker.run(["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 5_000 });
+    return r.code === 0 && r.stdout.trim() === "true";
+  }
+
+  private async inspectStateAndLabelsAsync(name: string): Promise<{ exists: boolean; running: boolean; labels: Record<string, string> }> {
+    const state = await this.docker.runAsync(["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 5_000 });
+    if (state.code !== 0) return { exists: false, running: false, labels: {} };
+    return { exists: true, running: state.stdout.trim() === "true", labels: await this.inspectLabelsAsync(name) };
+  }
+
+  private inspectStateAndLabelsSync(name: string): { exists: boolean; running: boolean; labels: Record<string, string> } {
+    const state = this.docker.run(["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 5_000 });
+    if (state.code !== 0) return { exists: false, running: false, labels: {} };
+    return { exists: true, running: state.stdout.trim() === "true", labels: this.inspectLabelsSync(name) };
+  }
+
+  private async inspectLabelsAsync(name: string): Promise<Record<string, string>> {
+    const r = await this.docker.runAsync(["inspect", "-f", "{{json .Config.Labels}}", name], { timeoutMs: 5_000 });
+    return parseLabels(r.stdout);
+  }
+
+  private inspectLabelsSync(name: string): Record<string, string> {
+    const r = this.docker.run(["inspect", "-f", "{{json .Config.Labels}}", name], { timeoutMs: 5_000 });
+    return parseLabels(r.stdout);
+  }
+
+  /**
+   * An existing container under our name must be one this project created with
+   * the same configuration. Foreign or mismatched containers are an explicit
+   * conflict — they are never removed or silently reused (K10).
+   */
+  private async verifyOwnedMatchAsync(name: string, spec: ContainerSpec): Promise<void> {
+    assertOwnedMatch(name, spec, await this.inspectLabelsAsync(name));
+  }
+
+  private verifyOwnedMatchSync(name: string, spec: ContainerSpec): void {
+    assertOwnedMatch(name, spec, this.inspectLabelsSync(name));
+  }
+
+  /** The init lock is held by a peer: poll for the container it is creating. */
+  private async awaitPeerInitAsync(dataDir: string, name: string, spec: ContainerSpec): Promise<boolean> {
+    for (let i = 0; i < 300; i++) {
       await new Promise((r) => setTimeout(r, 200));
+      if (await this.inspectRunningAsync(name)) {
+        await this.verifyOwnedMatchAsync(name, spec);
+        return true;
+      }
+      if (!initLockHeldByOthers(dataDir, name)) return false;
     }
-    const died = await this.docker.runAsync(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", spec.name], { timeoutMs: 5_000 });
-    throw new DomainError(
-      "kali_start",
-      `campaign container ${spec.name} exited before exec (${died.stdout.trim() || "missing"})`,
-      "protocol_error",
-    );
+    return false;
+  }
+
+  private awaitPeerInitSync(dataDir: string, name: string, spec: ContainerSpec): boolean {
+    for (let i = 0; i < 600; i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      if (this.inspectRunningSync(name)) {
+        this.verifyOwnedMatchSync(name, spec);
+        return true;
+      }
+      if (!initLockHeldByOthers(dataDir, name)) return false;
+    }
+    return false;
   }
 
   private async execBackgroundAsync(
@@ -858,6 +1066,7 @@ export class KaliRuntime {
     }
     this.docker.run(["kill", name], { timeoutMs: 10_000 });
     this.docker.run(["rm", "-f", name], { timeoutMs: 10_000 });
+    this.coordinator.invalidate(name);
   }
 
   inspectName(name: string): "running" | "exited" | "missing" {
@@ -930,6 +1139,111 @@ function tcpDestFromArgs(bin: string, args: string[]): string | null {
 
 function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function parseLabels(stdout: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(stdout.trim() || "{}") as unknown;
+    if (parsed && typeof parsed === "object") return parsed as Record<string, string>;
+  } catch {
+    // unparseable inspect output: treat as unlabeled
+  }
+  return {};
+}
+
+function ownedByThisProject(labels: Record<string, string>): boolean {
+  return labels["rionext.from"] === "master";
+}
+
+function initConflict(name: string): DomainError {
+  return new DomainError(
+    "kali_init_conflict",
+    `container ${name} is already initialized with a different configuration`,
+    "denied",
+  );
+}
+
+function foreignConflict(name: string): DomainError {
+  return new DomainError(
+    "kali_init_conflict",
+    `container ${name} exists but is not owned by this project; refusing to remove or reuse it`,
+    "denied",
+  );
+}
+
+function assertOwnedMatch(name: string, spec: ContainerSpec, labels: Record<string, string>): void {
+  if (!ownedByThisProject(labels)) throw foreignConflict(name);
+  // Containers created before fingerprints existed carry no fp label; accept
+  // them as owned (their config predates conflict detection).
+  const fp = labels["rionext.fp"];
+  if (fp != null && fp !== spec.fingerprint) throw initConflict(name);
+}
+
+/**
+ * Cross-process init maintenance lock: a file in the data dir's locks/ folder,
+ * created O_EXCL, self-describing, with a TTL so a crashed initializer cannot
+ * block later attempts forever. Init is bounded by the docker call timeouts
+ * (well under the TTL). The lock never authorizes deleting a container — it
+ * only serializes creation; ownership checks stay authoritative.
+ */
+const INIT_LOCK_TTL_MS = 120_000;
+
+interface InitLockHandle {
+  release(): void;
+}
+
+function initLockPath(dataDir: string, name: string): string {
+  return join(dataDir, "locks", `init-${name.replace(/[^a-zA-Z0-9_.-]/g, "_")}.lock`);
+}
+
+export function acquireInitLock(dataDir: string, name: string, fingerprint: string): InitLockHandle | null {
+  const path = initLockPath(dataDir, name);
+  mkdirSync(dirname(path), { recursive: true });
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeFileSync(path, JSON.stringify({ token, pid: process.pid, name, fingerprint, at: Date.now() }), {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      return {
+        release: () => {
+          try {
+            const cur = JSON.parse(readFileSync(path, "utf8")) as { token?: string };
+            if (cur.token === token) rmSyncSilent(path);
+          } catch {
+            // lock file already gone or replaced
+          }
+        },
+      };
+    } catch {
+      // EEXIST: held by someone else — maybe stale
+      if (!initLockHeldByOthers(dataDir, name) && attempt === 0) {
+        rmSyncSilent(path);
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+/** True when a fresh lock file for this name exists (any holder). */
+export function initLockHeldByOthers(dataDir: string, name: string): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(initLockPath(dataDir, name), "utf8")) as { at?: number };
+    return typeof raw.at === "number" && Date.now() - raw.at < INIT_LOCK_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+function rmSyncSilent(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // already gone
+  }
 }
 
 function containerRootOf(opts: KaliStartOpts): string {

@@ -18,6 +18,9 @@ class RecordingDocker {
   calls: string[][] = [];
   run(argv: string[], _opts?: DockerRunOpts): DockerExecResult {
     this.calls.push(argv);
+    if (argv[0] === "inspect" && argv.some((a) => a.includes("Config.Labels"))) {
+      return { code: 0, stdout: '{"rionext.from":"master"}', stderr: "", timedOut: false };
+    }
     if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) {
       return { code: 0, stdout: "true\n", stderr: "", timedOut: false };
     }

@@ -118,12 +118,14 @@ test("playwright close op is allowed and reaches the daemon payload", async () =
     calls,
     run(argv: string[], _o?: DockerRunOpts): DockerExecResult {
       calls.push([...argv]);
+      if (argv[0] === "inspect" && argv.some((a) => a.includes("Config.Labels"))) return { stdout: '{"rionext.from":"master"}', stderr: "", code: 0, timedOut: false };
       if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) return { stdout: "true\n", stderr: "", code: 0, timedOut: false };
       if (argv[0] === "image") return { stdout: "sha256:f\n", stderr: "", code: 0, timedOut: false };
       return { stdout: "{}", stderr: "", code: 0, timedOut: false };
     },
     async runAsync(argv: string[], _o?: DockerRunOpts): Promise<DockerExecResult> {
       calls.push([...argv]);
+      if (argv[0] === "inspect" && argv.some((a) => a.includes("Config.Labels"))) return { stdout: '{"rionext.from":"master"}', stderr: "", code: 0, timedOut: false };
       if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) return { stdout: "true\n", stderr: "", code: 0, timedOut: false };
       if (argv[0] === "image") return { stdout: "sha256:f\n", stderr: "", code: 0, timedOut: false };
       return { stdout: "{}", stderr: "", code: 0, timedOut: false };

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { KaliEffectAdapter } from "../../src/tools/kali-adapter.ts";
 import type { DockerExecResult, DockerRunOpts } from "../../src/tools/docker-cli.ts";
+import { ContainerInitCoordinator } from "../../src/tools/container-init.ts";
 import { KaliRuntime, type KaliStartOpts } from "../../src/tools/kali-runtime.ts";
 
 function tmp(): string {
@@ -21,6 +22,7 @@ class GateDocker {
 
   run(argv: string[], _opts?: DockerRunOpts): DockerExecResult {
     this.calls.push([...argv]);
+    if (argv[0] === "inspect" && argv.some((a) => a.includes("Config.Labels"))) return { ...OK, stdout: '{"rionext.from":"master"}' };
     if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) return { ...OK, stdout: "true\n" };
     if (argv[0] === "image") return { ...OK, stdout: "sha256:fake\n" };
     return OK;
@@ -28,6 +30,7 @@ class GateDocker {
 
   async runAsync(argv: string[], opts?: DockerRunOpts): Promise<DockerExecResult> {
     this.calls.push([...argv]);
+    if (argv[0] === "inspect" && argv.some((a) => a.includes("Config.Labels"))) return { ...OK, stdout: '{"rionext.from":"master"}' };
     if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) return { ...OK, stdout: "true\n" };
     if (argv[0] === "image") return { ...OK, stdout: "sha256:fake\n" };
     // foreground exec: ["exec","-w",root,<name>,"timeout",...]
@@ -63,7 +66,7 @@ function optsFor(dir: string, campaignId: string): KaliStartOpts {
 test("C1: while one foreground tool is held, the sibling's tool actually starts and finishes", async () => {
   const dir = tmp();
   const docker = new GateDocker();
-  const rt = new KaliRuntime(docker as never);
+  const rt = new KaliRuntime(docker as never, new ContainerInitCoordinator());
   const adapter = new KaliEffectAdapter(rt, (invocationId) => optsFor(dir, invocationId.startsWith("a") ? "a" : "b"));
 
   // warm both containers (ensure) without any gate
@@ -92,7 +95,7 @@ test("C1: while one foreground tool is held, the sibling's tool actually starts 
 test("C1: aborting one invocation's signal kills only its own exec", async () => {
   const dir = tmp();
   const docker = new GateDocker();
-  const rt = new KaliRuntime(docker as never);
+  const rt = new KaliRuntime(docker as never, new ContainerInitCoordinator());
   const adapter = new KaliEffectAdapter(rt, (invocationId) => optsFor(dir, invocationId.startsWith("a") ? "a" : "b"));
   await adapter.sendAsync("a0", { kind: "kali", bin: "cat", args: ["readme"] });
   await adapter.sendAsync("b0", { kind: "kali", bin: "cat", args: ["readme"] });

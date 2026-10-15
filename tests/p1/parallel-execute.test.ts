@@ -34,6 +34,7 @@ class RunGateDocker {
   async runAsync(argv: string[], _opts?: DockerRunOpts): Promise<DockerExecResult> {
     this.calls.push([...argv]);
     if (argv[0] === "image") return { ...OK, stdout: "sha256:fake\n" };
+    if (argv[0] === "inspect" && argv.some((a) => a.includes("Config.Labels"))) return { ...OK, stdout: '{"rionext.from":"master"}' };
     if (argv[0] === "inspect" && argv.includes("{{.State.Running}}")) return { ...OK, stdout: "true\n" };
     if (argv[0] === "exec" && argv[1] === "-w" && !argv.includes("-d")) {
       this.runDirs.push(String(argv[2]));

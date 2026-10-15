@@ -129,6 +129,8 @@ export class FakeDockerCli implements DockerCli {
   next: DockerExecResult = { stdout: "", stderr: "", code: 0, timedOut: false };
   alive = new Set<string>();
   created = new Set<string>();
+  /** Container name -> labels captured from --label args at run/create time. */
+  labels = new Map<string, Record<string, string>>();
   images = new Set(["rionext-kali:rolling", "rionext-kali:master"]);
 
   available(): boolean {
@@ -152,14 +154,27 @@ export class FakeDockerCli implements DockerCli {
     if (argv[0] === "run" && argv.includes("-d")) {
       const name = nameFrom(argv);
       if (name) {
+        // Real daemons reject a duplicate name; the fake must too (K01/K09).
+        if (this.alive.has(name) || this.created.has(name)) {
+          return {
+            stdout: "",
+            stderr: `docker: Error response from daemon: Conflict. The container name "/${name}" is already in use by container "abc123".`,
+            code: 1,
+            timedOut: false,
+          };
+        }
         this.alive.add(name);
         this.created.add(name);
+        this.labels.set(name, labelsFrom(argv));
       }
       return { stdout: name ?? "cid", stderr: "", code: 0, timedOut: false };
     }
     if (argv[0] === "create") {
       const name = nameFrom(argv);
-      if (name) this.created.add(name);
+      if (name) {
+        this.created.add(name);
+        this.labels.set(name, labelsFrom(argv));
+      }
       return { stdout: name ?? "cid", stderr: "", code: 0, timedOut: false };
     }
     if (argv[0] === "rmi") {
@@ -181,6 +196,7 @@ export class FakeDockerCli implements DockerCli {
       if (name) {
         this.alive.delete(name);
         this.created.delete(name);
+        this.labels.delete(name);
       }
       return { stdout: "", stderr: "", code: 0, timedOut: false };
     }
@@ -188,6 +204,9 @@ export class FakeDockerCli implements DockerCli {
       const name = argv[argv.length - 1] ?? "";
       const exists = this.alive.has(name) || this.created.has(name);
       if (!exists) return { stdout: "", stderr: "No such object", code: 1, timedOut: false };
+      if (argv.some((a) => a.includes("Config.Labels"))) {
+        return { stdout: JSON.stringify(this.labels.get(name) ?? {}), stderr: "", code: 0, timedOut: false };
+      }
       return { stdout: this.alive.has(name) ? "true" : "false", stderr: "", code: 0, timedOut: false };
     }
     return {
@@ -208,4 +227,15 @@ function nameFrom(argv: string[]): string | null {
   const i = argv.indexOf("--name");
   if (i >= 0 && argv[i + 1]) return argv[i + 1]!;
   return null;
+}
+
+function labelsFrom(argv: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--label" && argv[i + 1]) {
+      const eq = argv[i + 1]!.indexOf("=");
+      if (eq > 0) out[argv[i + 1]!.slice(0, eq)] = argv[i + 1]!.slice(eq + 1);
+    }
+  }
+  return out;
 }
