@@ -1571,12 +1571,24 @@ export class StorageService {
         | undefined;
       if (!run) throw invalidInput("run_not_found", "run not found");
       if (String(run.state) === "finished") return { applied: false };
-      if (expected && Number(run.fence) !== expected.fence) return { applied: false };
-      if (
-        expected?.controller_generation != null &&
-        (run.controller_generation == null || Number(run.controller_generation) !== expected.controller_generation)
-      ) {
-        return { applied: false };
+      if (expected) {
+        if (Number(run.fence) !== expected.fence) return { applied: false };
+        if (
+          expected.controller_generation != null &&
+          (run.controller_generation == null || Number(run.controller_generation) !== expected.controller_generation)
+        ) {
+          return { applied: false };
+        }
+        if (expected.controller_generation != null) {
+          // The generation that owned this run must still hold the lock: a
+          // superseded controller's finish is archival, never a conclusion.
+          const lock = this.store.db
+            .prepare("SELECT 1 FROM controller_locks WHERE campaign_id = ? AND owner = ? AND generation = ? AND lease_until > ?")
+            .get(campaignId, String(run.lease_owner ?? ""), expected.controller_generation, Date.now());
+          if (!lock) return { applied: false };
+        }
+        // The run must still be within its real lease to conclude by itself.
+        if (Date.now() >= Number(run.deadline_ms)) return { applied: false };
       }
       let appliedOutcome = outcome;
       if (run.finish_payload_json && run.mode === "execute") {
@@ -2938,12 +2950,15 @@ export class StorageService {
    */
   private assertWorkerWrite(lease: RunLease): void {
     const run = this.store.db
-      .prepare("SELECT campaign_id, state, fence, controller_generation FROM task_runs WHERE id = ?")
+      .prepare("SELECT campaign_id, state, fence, controller_generation, deadline_ms FROM task_runs WHERE id = ?")
       .get(lease.run_id) as Record<string, unknown> | undefined;
     if (!run) throw denied("lease_lost", "run not found");
     if (String(run.campaign_id) !== lease.campaign_id) throw denied("cross_campaign_ref", "run belongs to another campaign");
     if (run.state !== "claimed" && run.state !== "running") throw denied("lease_lost", `run is ${String(run.state)}`);
     if (Number(run.fence) !== lease.fence) throw denied("lease_lost", "stale fence");
+    // A run whose real lease lapsed cannot write, even before periodic
+    // recovery marks it (deadline <= now is expired).
+    if (Date.now() >= Number(run.deadline_ms)) throw denied("lease_lost", "run lease expired");
     if (lease.controller_generation != null) {
       if (run.controller_generation == null || Number(run.controller_generation) !== lease.controller_generation) {
         throw denied("lease_lost", "run controller generation mismatch");

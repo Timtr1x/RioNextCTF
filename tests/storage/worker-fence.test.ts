@@ -268,3 +268,49 @@ test("L18: a worker whose promise rejects is memory-cleaned and its run is recla
   assert.equal(String(e.storage.getRun(lease.run_id).state), "lease_expired");
   e.close();
 });
+
+test("P1-02: a superseded controller's finishRun with its true old fence is archival only", () => {
+  const e = boot("wf-takeover");
+  const id = "wf-takeover";
+  seedStep(e, id, "wf-to-fp");
+  const c1 = ctrlFor(e, id);
+  const a = e.storage.claimNextStep(id, c1, 1)!;
+  takeover(e, id);
+  // the old controller settles its run with the exact fence/generation it was issued
+  const late = e.storage.finishRun(id, a.run_id, {
+    run_id: a.run_id, step_id: a.step_id, mode: "execute", reason: "resolved", summary: "old win",
+    observation_ids: [], fact_ids: [], finding_ids: [], blocked_on: null, reopen_rule: null,
+    finish_requested: true, protocol_error: null,
+  }, { fence: a.fence, controller_generation: a.controller_generation });
+  assert.equal(late.applied, false, "a superseded controller cannot conclude its run");
+  assert.equal(String(e.storage.getRun(a.run_id).state), "running");
+  const step = e.storage.store.db.prepare("SELECT status, active_run_id FROM steps WHERE id = ?").get(a.step_id) as { status: string };
+  assert.notEqual(step.status, "resolved");
+  e.close();
+});
+
+test("P1-02: a run whose DB lease lapsed cannot write or send, even before recovery marks it", async () => {
+  const e = boot("wf-expired");
+  const id = "wf-expired";
+  seedStep(e, id, "wf-ex-fp");
+  const c1 = ctrlFor(e, id);
+  const claimed = e.storage.claimNextStep(id, c1, 1)!;
+  const lease = leaseOf(id, claimed, claimed.step_id);
+  // the real lease lapses while the row still says running
+  e.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = ? WHERE id = ?").run(Date.now() - 1, lease.run_id);
+  assert.throws(
+    () =>
+      e.storage.recordObservation({
+        campaign_id: id, producer_id: "w", submission_id: "exp-obs", run_id: lease.run_id, attempt_id: lease.run_id,
+        subject: "s", body: {}, artifact_refs: [], conditions: {}, env_rev: "env-1", lease,
+      }),
+    (err: unknown) => err instanceof DomainError && err.code === "lease_lost",
+  );
+  const adapter = new FileEffectAdapter(join(e.config.data_dir, "fx"));
+  const gate = new DispatchGate(e.storage, e.budget, new InvocationBook(e.storage), adapter);
+  const res = gate.dispatch({ lease, purpose: "fx", payload: { op: "touch" }, effect: "external_write", envTool: true });
+  assert.equal(res.status, "rejected");
+  assert.equal(res.reason, "lease_expired");
+  assert.equal(adapter.sendCount(), 0, "nothing was sent on an expired lease");
+  e.close();
+});

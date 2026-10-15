@@ -264,7 +264,7 @@ export class PiWorker implements WorkerRuntime {
           .map((c) => ("text" in c && typeof c.text === "string" ? c.text : ""))
           .join("");
         const raw = text + JSON.stringify(result.details ?? {});
-        ingestToolOutputAsData(this.deps.storage, lease.campaign_id, lease.run_id, raw);
+        ingestToolOutputAsData(this.deps.storage, lease.campaign_id, lease.run_id, raw, lease);
         const art = await this.deps.storage.putArtifact(lease.campaign_id, raw.slice(0, 200_000), "application/json", lease.run_id);
         if (isEnvTool(toolCall.name)) {
           this.deps.storage.recordObservation({

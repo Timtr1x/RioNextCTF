@@ -37,20 +37,28 @@ export function guardToolArgs(storage: StorageService, campaignId: string, args:
   return null;
 }
 
-export function ingestToolOutputAsData(storage: StorageService, campaignId: string, runId: string, text: string): void {
+export function ingestToolOutputAsData(storage: StorageService, campaignId: string, runId: string, text: string, lease?: RunLease): void {
   if (!isPolicyInjectionText(text)) return;
-  storage.recordObservation({
-    campaign_id: campaignId,
-    producer_id: runId,
-    submission_id: `inj-${Date.now()}`,
-    run_id: runId,
-    attempt_id: runId,
-    subject: "untrusted_tool_text",
-    body: { text, treated_as: "data" },
-    artifact_refs: [],
-    conditions: {},
-    env_rev: storage.getCampaign(campaignId).spec.environment_revision,
-  });
+  try {
+    storage.recordObservation({
+      campaign_id: campaignId,
+      producer_id: runId,
+      submission_id: `inj-${Date.now()}`,
+      run_id: runId,
+      attempt_id: runId,
+      subject: "untrusted_tool_text",
+      body: { text, treated_as: "data" },
+      artifact_refs: [],
+      conditions: {},
+      env_rev: storage.getCampaign(campaignId).spec.environment_revision,
+      lease,
+    });
+  } catch (err) {
+    // A fenced-off run's raw dump is dropped, never written: the run is dead
+    // and its outputs must not land as new business state. Other faults raise.
+    if (err instanceof DomainError && err.code === "lease_lost") return;
+    throw err;
+  }
 }
 
 export interface ToolInvokeRequest {
@@ -388,7 +396,7 @@ export class ToolGateway {
         }
         this.toolSends += 1;
         this.envSends += 1;
-        ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}));
+        ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}), this.lease);
         return { invocation_id: timed.value.invocation_id, blocked: false, allowed: true };
       } catch (err) {
         const reason = err instanceof DomainError ? err.code : String(err);
@@ -396,7 +404,7 @@ export class ToolGateway {
       }
     }
     if (terminal) {
-      ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}));
+      ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}), this.lease);
       return { invocation_id: "terminal", blocked: false, allowed: true };
     }
     if (!this.budget.canAdmit(this.lease.campaign_id, 1, 0, 0)) {
@@ -422,7 +430,7 @@ export class ToolGateway {
     this.toolSends += 1;
     this.invocations.mark(inv.id, "completed");
     this.budget.settle(this.lease.campaign_id, inv.id, 1, 0, 0, 1, 0, 0);
-    ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}));
+    ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}), this.lease);
     return { invocation_id: inv.id, blocked: false, allowed: true };
   }
 }

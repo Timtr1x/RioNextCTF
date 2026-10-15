@@ -104,6 +104,10 @@ export class DispatchGate {
       if (Number(run.fence) !== req.lease.fence) {
         return { ok: false as const, reason: "stale_fence", invocation_id: "none" };
       }
+      // A run whose real lease lapsed cannot send, even before recovery marks it.
+      if (Date.now() >= Number(run.deadline_ms)) {
+        return { ok: false as const, reason: "lease_expired", invocation_id: "none" };
+      }
       if (run.controller_generation != null) {
         // L09: the controller generation that claimed this run must still hold
         // the lock; a taken-over or lapsed controller fences off its runs.
