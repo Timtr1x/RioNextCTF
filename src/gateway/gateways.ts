@@ -7,9 +7,9 @@ import { createScriptedErrorStream } from "../runtime/pi/scripted-stream.ts";
 import type { StorageService } from "../storage/service.ts";
 import { BudgetLedger } from "./budget-ledger.ts";
 import { runWithOuterDeadline } from "./deadline.ts";
-import type { Semaphore } from "./semaphore.ts";
+import { QueueDeadlineError, type Permit, type Semaphore } from "./semaphore.ts";
 import type { DispatchGate } from "./dispatch.ts";
-import { InvocationBook } from "./invocation.ts";
+import { InvocationBook, type InvocationRecord } from "./invocation.ts";
 import { assertSafeToolPath, isPolicyInjectionText } from "./sandbox.ts";
 import { join } from "node:path";
 
@@ -113,42 +113,99 @@ export class ModelGateway {
     this.phase = phase;
   }
 
-  /** Acquire a provider slot, run the stream, release on settle. */
-  private gatedStream(callModel: Model<string>, context: Context, callOpts: unknown): Promise<AssistantMessageEventStream> {
-    const sem = this.sem!;
-    return (async () => {
-      // A queued worker must not wake up past its lease and still call the provider.
-      let permit;
+  /**
+   * Re-check admission against the database after a queued wait, right before
+   * the provider call. A campaign paused/cancelled or a run reclaimed while we
+   * queued must release the slot without ever sending (spec H01 §3.4).
+   */
+  private revalidateBeforeSend(): string | null {
+    let camp;
+    try {
+      camp = this.storage.getCampaign(this.lease.campaign_id);
+    } catch {
+      return "campaign_not_found";
+    }
+    if (camp.cancel_epoch > this.lease.cancel_epoch || camp.state === "cancelled") return "campaign cancelled";
+    // Paused or hard-stopped while queueing: release the slot, never send.
+    if (camp.state === "paused" || camp.state === "budget_paused") return "campaign_not_active";
+    if (this.lease.mode === "execute" && !this.storage.admissionOpen(this.lease.campaign_id)) return "admission closed";
+    let run;
+    try {
+      run = this.storage.getRun(this.lease.run_id);
+    } catch {
+      return "run_not_live";
+    }
+    if (String(run.state) !== "claimed" && String(run.state) !== "running") return "run_not_live";
+    if (Number(run.fence) !== this.lease.fence) return "stale_fence";
+    // Fresh DB deadline, not the snapshot taken when the lease was created.
+    if (Date.now() > Number(run.deadline_ms)) return "lease_expired";
+    return null;
+  }
+
+  /**
+   * Queue for a provider slot, revalidate, send, and observe termination.
+   * The permit is held until the underlying stream actually finishes — an
+   * abort signal alone does not prove the provider connection is gone (S15).
+   */
+  private async sendGated(
+    callModel: Model<string>,
+    context: Context,
+    callOpts: unknown,
+    inv: InvocationRecord,
+    settle: SettleOnce,
+  ): Promise<AssistantMessageEventStream> {
+    let permit: Permit | null = null;
+    if (this.sem) {
       try {
-        permit = await sem.acquire({ deadlineAt: this.lease.deadline_ms });
-      } catch {
-        return createScriptedErrorStream(callModel, "lease_expired");
-      }
-      let released = false;
-      const release = (): void => {
-        if (!released) {
-          released = true;
-          permit.release();
-        }
-      };
-      try {
-        const stream = await this.inner(callModel, context, callOpts as never);
-        if (stream && typeof (stream as { result?: unknown }).result === "function") {
-          const orig = (stream as AssistantMessageEventStream).result.bind(stream as AssistantMessageEventStream);
-          (stream as unknown as { result: () => Promise<unknown> }).result = async () => {
-            try {
-              return await orig();
-            } finally {
-              release();
-            }
-          };
-        }
-        return stream as AssistantMessageEventStream;
+        permit = await this.sem.acquire({ deadlineAt: this.lease.deadline_ms });
       } catch (err) {
-        release();
-        throw err;
+        // Never granted => provably never sent: release the reservation.
+        settle.neverSent(err instanceof QueueDeadlineError ? "lease_expired" : "queue_aborted");
+        return errorStream(callModel, err instanceof QueueDeadlineError ? "lease_expired" : "queue_aborted");
       }
-    })();
+      const deny = this.revalidateBeforeSend();
+      if (deny) {
+        permit.release();
+        settle.neverSent(deny);
+        return errorStream(callModel, deny);
+      }
+    }
+    this.invocations.mark(inv.id, "dispatching");
+    this.invocations.mark(inv.id, "running");
+    this.modelSends += 1;
+    let raw: AssistantMessageEventStream;
+    try {
+      raw = await this.inner(callModel, context, callOpts as never);
+    } catch (err) {
+      // The provider never produced a stream: nothing was sent.
+      permit?.release();
+      settle.neverSent(String(err instanceof Error ? err.message : err));
+      return errorStream(callModel, err instanceof Error ? err.message : String(err));
+    }
+    // Terminal observation independent of the consumer: budget and slot settle
+    // exactly once when the stream truly ends, even if nobody calls result().
+    const orig = raw.result.bind(raw) as () => Promise<SettleMessage>;
+    const terminal = orig();
+    void terminal.then(
+      (msg) => {
+        try {
+          settle.ok(msg);
+        } finally {
+          permit?.release();
+        }
+      },
+      (err) => {
+        try {
+          settle.err(err);
+        } finally {
+          permit?.release();
+        }
+      },
+    );
+    // Every consumer shares the one underlying promise: no double settle, and
+    // errors still propagate to whoever awaits result().
+    (raw as unknown as { result: () => Promise<unknown> }).result = () => terminal;
+    return raw;
   }
 
 
@@ -202,48 +259,20 @@ export class ModelGateway {
       reserved_tokens: reserveTokens,
     });
     this.budget.reserve(this.lease.campaign_id, inv.id, 1, reserveTokens, 0);
-    this.invocations.mark(inv.id, "dispatching");
-    this.invocations.mark(inv.id, "running");
-    this.modelSends += 1;
-    try {
-      const callModel = { ...model, maxTokens: reserveTokens };
-      const callOpts = {
-        ...options,
-        maxTokens: reserveTokens,
-        reasoning: finalizing ? ("low" as const) : options?.reasoning,
-      };
-      // Provider concurrency cap: the stream waits for a free slot before the
-      // provider call starts; the slot frees when the stream settles. The
-      // (possibly gated) stream still flows through wrapSettle below, which is
-      // what settles the invocation and the budget reserve.
-      const stream = this.sem ? this.gatedStream(callModel, context, callOpts) : this.inner(callModel, context, callOpts);
-      return wrapSettle(stream, (msg) => {
-        const tokens = Number(msg.usage?.totalTokens ?? reserveTokens);
-        const failed = msg.stopReason === "error" || msg.stopReason === "aborted";
-        this.invocations.mark(inv.id, failed ? "failed_known" : "completed", {
-          actual_tokens: tokens,
-          error: msg.errorMessage ?? undefined,
-          status: msg.stopReason,
-        });
-        this.budget.settle(
-          this.lease.campaign_id,
-          inv.id,
-          1,
-          tokens,
-          0,
-          inv.reserved_calls,
-          inv.reserved_tokens,
-          inv.reserved_cost,
-        );
-      }, (err) => {
-        this.invocations.mark(inv.id, "failed_known", { error: String(err) });
-        this.budget.settle(this.lease.campaign_id, inv.id, 1, 0, 0, inv.reserved_calls, inv.reserved_tokens, inv.reserved_cost);
-      });
-    } catch (err) {
-      this.invocations.mark(inv.id, "failed_known", { error: String(err) });
-      this.budget.settle(this.lease.campaign_id, inv.id, 1, 0, 0, inv.reserved_calls, inv.reserved_tokens, inv.reserved_cost);
-      return errorStream(model, err instanceof Error ? err.message : String(err));
-    }
+    // One settle for every terminal path — success, provider error, queue
+    // denial, or a thrown send. Repeat settlement is a no-op (S13).
+    const settle = new SettleOnce(this.invocations, this.budget, this.lease.campaign_id, inv);
+    const callModel = { ...model, maxTokens: reserveTokens };
+    const callOpts = {
+      ...options,
+      maxTokens: reserveTokens,
+      reasoning: finalizing ? ("low" as const) : options?.reasoning,
+    };
+    // Provider concurrency cap: the stream waits for a free slot before the
+    // provider call starts; the slot frees when the stream settles. The
+    // (possibly queued) stream still settles the invocation and the budget
+    // reserve through `settle` on its real termination.
+    return this.sendGated(callModel, context, callOpts, inv, settle);
   };
 }
 
@@ -387,31 +416,59 @@ function admissionDeadline(storage: StorageService, lease: RunLease): string | n
   return null;
 }
 
-function errorStream(model: Model<string>, message: string): AssistantMessageEventStream {
-  return createScriptedErrorStream(model, message);
+interface SettleMessage {
+  usage?: { totalTokens?: number };
+  stopReason?: string;
+  errorMessage?: string | null;
 }
 
-function wrapSettle(
-  stream: AssistantMessageEventStream | Promise<AssistantMessageEventStream>,
-  onOk: (msg: { usage?: { totalTokens?: number }; stopReason?: string; errorMessage?: string | null }) => void,
-  onErr: (e: unknown) => void,
-): AssistantMessageEventStream | Promise<AssistantMessageEventStream> {
-  if (stream && typeof (stream as Promise<AssistantMessageEventStream>).then === "function") {
-    return (stream as Promise<AssistantMessageEventStream>).then((s) => wrapSettle(s, onOk, onErr) as AssistantMessageEventStream);
+/**
+ * Exactly-once settlement of a model invocation and its budget reservation.
+ * ok(): the stream finished — actual tokens are settled (0 for error/aborted
+ * stops, which prove nothing about delivery but do about our own stream).
+ * neverSent(): no provider request left this process — release the reservation.
+ * err(): transport-level failure — settle to zero actuals, keep the reason.
+ */
+class SettleOnce {
+  private done = false;
+
+  constructor(
+    private readonly invocations: InvocationBook,
+    private readonly budget: BudgetLedger,
+    private readonly campaignId: string,
+    private readonly inv: InvocationRecord,
+  ) {}
+
+  ok(msg: SettleMessage): void {
+    if (this.done) return;
+    this.done = true;
+    const failed = msg.stopReason === "error" || msg.stopReason === "aborted";
+    const tokens = Number(msg.usage?.totalTokens ?? this.inv.reserved_tokens);
+    this.invocations.mark(this.inv.id, failed ? "failed_known" : "completed", {
+      actual_tokens: tokens,
+      error: msg.errorMessage ?? undefined,
+      status: msg.stopReason,
+    });
+    this.budget.settle(this.campaignId, this.inv.id, 1, tokens, 0, this.inv.reserved_calls, this.inv.reserved_tokens, this.inv.reserved_cost);
   }
-  const s = stream as AssistantMessageEventStream;
-  const orig = s.result.bind(s);
-  (s as unknown as { result: () => Promise<unknown> }).result = async () => {
-    try {
-      const r = (await orig()) as { usage?: { totalTokens?: number }; stopReason?: string; errorMessage?: string | null };
-      onOk(r);
-      return r;
-    } catch (e) {
-      onErr(e);
-      throw e;
-    }
-  };
-  return s;
+
+  neverSent(reason: string): void {
+    if (this.done) return;
+    this.done = true;
+    this.invocations.mark(this.inv.id, "failed_known", { error: `not_dispatched:${reason}` });
+    this.budget.settle(this.campaignId, this.inv.id, 1, 0, 0, this.inv.reserved_calls, this.inv.reserved_tokens, this.inv.reserved_cost);
+  }
+
+  err(err: unknown): void {
+    if (this.done) return;
+    this.done = true;
+    this.invocations.mark(this.inv.id, "failed_known", { error: String(err) });
+    this.budget.settle(this.campaignId, this.inv.id, 1, 0, 0, this.inv.reserved_calls, this.inv.reserved_tokens, this.inv.reserved_cost);
+  }
+}
+
+function errorStream(model: Model<string>, message: string): AssistantMessageEventStream {
+  return createScriptedErrorStream(model, message);
 }
 
 export { denied };
