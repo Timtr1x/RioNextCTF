@@ -585,6 +585,7 @@ export class KaliRuntime {
     const record: ExecRecord = {
       execution_id: executionId,
       container: spec.name,
+      container_id: (await this.inspectContainerIdAsync(spec.name)) ?? undefined,
       run_id: opts.runId ?? null,
       argv_preview: [bin, ...args].slice(0, 12),
       phase: "started",
@@ -600,18 +601,23 @@ export class KaliRuntime {
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
       signal: extra?.signal,
     });
+    let cancelOutcome: string | null = null;
     if (extra?.signal?.aborted) {
       // Killing the host docker client does not stop the in-container process.
       // Terminate the process group by its persisted marker and confirm.
-      await this.cancelExecution(opts, executionId).catch(() => "unknown" as const);
+      cancelOutcome = await this.cancelExecution(opts, executionId).catch(() => "unknown");
     }
     const truncated =
       result.stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes ||
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     // The in-container `timeout` wrapper already reaped this invocation's
     // process. Never kill the container here: sibling runs share it (C4).
-    const latest = readExecRecord(files.json) ?? record;
-    writeExecRecord(files.json, { ...latest, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
+    if (cancelOutcome !== "unknown") {
+      // A confirmed (or never-requested) termination may end the record; an
+      // unknown container state must not be written as ended (P1-05).
+      const latest = readExecRecord(files.json) ?? record;
+      writeExecRecord(files.json, { ...latest, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
+    }
     const out = { ...result, truncated, container: spec.name };
     this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
@@ -799,6 +805,7 @@ export class KaliRuntime {
     const record: ExecRecord = {
       execution_id: executionId,
       container,
+      container_id: (await this.inspectContainerIdAsync(container)) ?? undefined,
       run_id: opts.runId ?? null,
       argv_preview: [bin, ...args].slice(0, 12),
       phase: "started",
@@ -910,6 +917,7 @@ export class KaliRuntime {
     const record: ExecRecord = {
       execution_id: executionId,
       container: spec.name,
+      container_id: this.inspectContainerIdSync(spec.name) ?? undefined,
       run_id: opts.runId ?? null,
       argv_preview: [bin, ...args].slice(0, 12),
       phase: "started",
@@ -968,8 +976,10 @@ export class KaliRuntime {
       const code = Number(readFileSync(files.exit, "utf8").trim());
       return code === 0 ? "completed" : "failed";
     }
-    const box = this.inspectName(opts.shared?.name ?? containerName(opts.campaignId));
-    if (box === "missing" || box === "exited") return "failed";
+    const record = readExecRecord(files.json);
+    if (record?.phase === "ended") return record.code === 0 ? "completed" : "failed";
+    // A missing/exited container is NOT proof of failure (P1-05): the process
+    // state is unknowable without an exit record.
     return "unknown";
   }
 
@@ -985,17 +995,17 @@ export class KaliRuntime {
     }
     const record = readExecRecord(files.json);
     if (record?.phase === "ended") return record.code === 0 ? "completed" : "failed";
-    const box = await this.inspectNameAsync(opts.shared?.name ?? containerName(opts.campaignId));
-    if (box === "missing" || box === "exited") return "failed";
     return "unknown";
   }
 
   /**
    * Cancel exactly one invocation's in-container process group (H04 §6.10).
-   * Identity is checked against the persistent record and the pid marker's
-   * cmdline before anything is signaled, so a reused pid or container name
-   * never kills the wrong process (E16). Killing the host docker CLI is never
-   * treated as proof the container side stopped (E17).
+   * Identity is checked against the persistent record (container name AND, when
+   * recorded, the container ID — a reused name never matches) and the pid
+   * marker's environment before anything is signaled (E16). Only an explicit
+   * positive probe confirms termination: a Docker error, empty output, or an
+   * identity mismatch is always "unknown" (P1-05), and an unknown cancel never
+   * lets the caller write the record as ended.
    */
   async cancelExecution(opts: KaliStartOpts, executionId: string): Promise<"confirmed" | "already_done" | "unknown"> {
     const files = opFiles(opts.workspaceHost, executionId, containerRootOf(opts));
@@ -1006,6 +1016,10 @@ export class KaliRuntime {
     if (record) {
       writeExecRecord(files.json, { ...record, cancel_requested: true });
     }
+    if (record?.container_id) {
+      const currentId = await this.inspectContainerIdAsync(container);
+      if (currentId == null || currentId !== record.container_id) return "unknown"; // name reused or inspect failed
+    }
     const box = await this.inspectNameAsync(container);
     if (box !== "running") {
       // A stopped container has no live processes: positive confirmation.
@@ -1014,18 +1028,39 @@ export class KaliRuntime {
     }
     const probeCmd = `if [ -f ${shQuote(files.containerPid)} ]; then P=$(cat ${shQuote(files.containerPid)}); if kill -0 "$P" 2>/dev/null && cat /proc/$P/environ 2>/dev/null | tr '\\0' '\\n' | grep -q "RIONEXT_EXEC=${executionId}"; then echo alive; else echo dead; fi; else echo dead; fi`;
     const probe = await this.docker.runAsync(["exec", container, "sh", "-c", probeCmd], { timeoutMs: 8_000 });
-    if (probe.stdout.trim() !== "alive") {
+    const probeOut = probe.stdout.trim();
+    if (probe.code !== 0 || (probeOut !== "alive" && probeOut !== "dead")) {
+      // The probe itself failed: nothing is proven either way.
+      return "unknown";
+    }
+    if (probeOut === "dead") {
       if (record) writeExecRecord(files.json, { ...record, cancel_requested: true, cancel_confirmed: true });
       return "confirmed";
     }
-    await this.docker.runAsync(
+    const kill = await this.docker.runAsync(
       ["exec", container, "sh", "-c", `P=$(cat ${shQuote(files.containerPid)}); kill -TERM -"$P" 2>/dev/null || kill -TERM "$P"`],
       { timeoutMs: 8_000 },
     );
+    if (kill.code !== 0) return "unknown";
     const recheck = await this.docker.runAsync(["exec", container, "sh", "-c", probeCmd], { timeoutMs: 8_000 });
-    const dead = recheck.stdout.trim() !== "alive";
+    const recheckOut = recheck.stdout.trim();
+    const dead = recheck.code === 0 && recheckOut === "dead";
     if (dead && record) writeExecRecord(files.json, { ...record, cancel_requested: true, cancel_confirmed: true });
     return dead ? "confirmed" : "unknown";
+  }
+
+  private inspectContainerIdSync(name: string): string | null {
+    const r = this.docker.run(["inspect", "-f", "{{.Id}}", name], { timeoutMs: 5_000 });
+    if (r.code !== 0) return null;
+    const id = r.stdout.trim();
+    return id || null;
+  }
+
+  private async inspectContainerIdAsync(name: string): Promise<string | null> {
+    const r = await this.docker.runAsync(["inspect", "-f", "{{.Id}}", name], { timeoutMs: 5_000 });
+    if (r.code !== 0) return null;
+    const id = r.stdout.trim();
+    return id || null;
   }
 
   inspectCampaignAsync(campaignId: string): Promise<"running" | "exited" | "missing"> {
@@ -1063,6 +1098,7 @@ export class KaliRuntime {
     writeExecRecord(files.json, {
       execution_id: executionId,
       container,
+      container_id: this.inspectContainerIdSync(container) ?? undefined,
       run_id: opts.runId ?? null,
       argv_preview: [bin, ...args].slice(0, 12),
       phase: "started",
@@ -1412,6 +1448,8 @@ function opFiles(workspaceHost: string, executionId: string, containerRoot = "/w
 export interface ExecRecord {
   execution_id: string;
   container: string;
+  /** Docker container ID when known: a reused NAME never matches (E16/P1-05). */
+  container_id?: string;
   run_id: string | null;
   argv_preview: string[];
   phase: "started" | "ended";

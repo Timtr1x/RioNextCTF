@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { Engine, openEngine } from "../controller/engine.ts";
 import { invalidInput } from "../domain/errors.ts";
 import { Semaphore } from "../gateway/semaphore.ts";
+import { resolveRuntimeConfig } from "../contracts/config.ts";
 import { seedChallengeStep, specFromInput, specFromUrl, type LoadedRun } from "../cli/run-spec.ts";
 import { fetchAttachment } from "../domain/attachment-fetch.ts";
 import type { ContestQuestion, FetchLike } from "./api.ts";
@@ -169,13 +170,17 @@ class EngineCampaignHandle implements CampaignHandle {
 
 export class EngineRunnerFactory implements RunnerFactory {
   private controlEngine: Engine | null = null;
-  /** One provider cap across all slot engines (slots x workers). */
-  private readonly modelSemaphore = new Semaphore(8);
+  /** One provider cap across all slot engines (slots x workers). The capacity
+   *  comes from the resolved runtime config (runtime.json < env < flags),
+   *  never a hardcoded number (P2-02). */
+  private readonly modelSemaphore: Semaphore;
 
   constructor(
     readonly contestDir: string,
     private readonly opts: EngineRunnerOptions = {},
-  ) {}
+  ) {
+    this.modelSemaphore = new Semaphore(resolveRuntimeConfig(contestDir, opts.flags ?? {}).max_inflight_model_calls);
+  }
 
   private log(line: string): void {
     this.opts.onLog?.(line);
@@ -184,6 +189,11 @@ export class EngineRunnerFactory implements RunnerFactory {
   /** Read access to the control engine's storage (tests and status tooling). */
   controlStorage(): Engine["storage"] {
     return this.controlEngineGet().storage;
+  }
+
+  /** The process-wide provider semaphore every slot engine shares. */
+  providerSemaphore(): Semaphore {
+    return this.modelSemaphore;
   }
 
   private controlEngineGet(): Engine {

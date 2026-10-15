@@ -173,3 +173,92 @@ test("E17: killing the host docker client triggers the in-container cancel probe
   const probed = docker.calls.some((c) => c[0] === "exec" && String(c[c.length - 1]).includes("kill -0"));
   assert.ok(probed, "the abort path confirmed the container side instead of assuming");
 });
+
+test("P1-05: a failed docker probe is unknown, never a confirmation", async () => {
+  const dir = tmp();
+  const docker = new CancelFake();
+  // break the probe: docker exec itself errors out
+  const orig = docker.runAsync.bind(docker);
+  docker.runAsync = async (argv: string[], o?: DockerRunOpts): Promise<DockerExecResult> => {
+    const script = String(argv[argv.length - 1] ?? "");
+    if (argv[0] === "exec" && script.includes("kill -0")) {
+      return { stdout: "", stderr: "docker daemon exploded", code: 1, timedOut: false };
+    }
+    return orig(argv, o);
+  };
+  const rt = new KaliRuntime(docker);
+  const opts = optsFor(dir, "p15a");
+  const recordPath = join(dir, "workspace", "p15a", ".rionext-ops", "kali_inv_p15a.json");
+  writeExecRecord(recordPath, {
+    execution_id: "kali_inv_p15a",
+    container: "rionext-kali-p15a",
+    run_id: null,
+    argv_preview: ["sleep"],
+    phase: "started",
+    started_at: new Date().toISOString(),
+  });
+  const result = await rt.cancelExecution(opts, "kali_inv_p15a");
+  assert.equal(result, "unknown", "a failed probe proves nothing");
+  const after = readExecRecord(recordPath);
+  assert.notEqual(after?.cancel_confirmed, true, "no confirmation was written");
+});
+
+test("P1-05: container missing without an exit record stays unknown at every layer", async () => {
+  const dir = tmp();
+  const docker = new FakeDockerCli(); // nothing created: the container is missing
+  const rt = new KaliRuntime(docker);
+  const opts = optsFor(dir, "p15b");
+  assert.equal(await rt.backgroundStatusAsync(opts, "kali_inv_p15b"), "unknown", "no exit record, no failed inference");
+  const { KaliEffectAdapter } = await import("../../src/tools/kali-adapter.ts");
+  const adapter = new KaliEffectAdapter(rt, () => opts);
+  const ev = await adapter.queryEvidence("kali_inv_p15b");
+  assert.equal(ev.status, "unknown", "queryEvidence never downgrades missing-container to failed/not_started");
+});
+
+test("P1-05: a reused container name with a different container id refuses to signal", async () => {
+  const dir = tmp();
+  const docker = new CancelFake();
+  const rt = new KaliRuntime(docker);
+  const opts = optsFor(dir, "p15c");
+  const recordPath = join(dir, "workspace", "p15c", ".rionext-ops", "kali_inv_p15c.json");
+  writeExecRecord(recordPath, {
+    execution_id: "kali_inv_p15c",
+    container: "rionext-kali-p15c",
+    container_id: "cid-the-original",
+    run_id: null,
+    argv_preview: ["sleep"],
+    phase: "started",
+    started_at: new Date().toISOString(),
+  });
+  // the fake answers {{.Id}} with a DIFFERENT id: the name was reused
+  const orig = docker.runAsync.bind(docker);
+  docker.runAsync = async (argv: string[], o?: DockerRunOpts): Promise<DockerExecResult> => {
+    if (argv[0] === "inspect" && argv.some((a) => a.includes("{{.Id}}"))) return { stdout: "cid-somebody-else\n", stderr: "", code: 0, timedOut: false };
+    return orig(argv, o);
+  };
+  const result = await rt.cancelExecution(opts, "kali_inv_p15c");
+  assert.equal(result, "unknown");
+  assert.equal(docker.killed, false, "the reused container was never signaled");
+});
+
+test("P1-05: an unknown cancel never lets the record be written as ended", async () => {
+  const dir = tmp();
+  const docker = new CancelFake();
+  // every probe errors: the container state is unknowable
+  const orig = docker.runAsync.bind(docker);
+  docker.runAsync = async (argv: string[], o?: DockerRunOpts): Promise<DockerExecResult> => {
+    const script = String(argv[argv.length - 1] ?? "");
+    if (argv[0] === "exec" && (script.includes("kill -0") || script.includes("kill -TERM"))) {
+      return { stdout: "", stderr: "daemon gone", code: 1, timedOut: false };
+    }
+    return orig(argv, o);
+  };
+  const rt = new KaliRuntime(docker);
+  const opts = optsFor(dir, "p15d");
+  const ctl = new AbortController();
+  ctl.abort();
+  await rt.execAsync(opts, "cat", ["x"], { executionId: "kali_inv_p15d", signal: ctl.signal });
+  const record = readExecRecord(join(dir, "workspace", "p15d", ".rionext-ops", "kali_inv_p15d.json"));
+  assert.ok(record);
+  assert.equal(record!.phase, "started", "unknown container state is not an ended record");
+});

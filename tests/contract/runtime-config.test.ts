@@ -200,3 +200,29 @@ test("engine worker counts never multiply the campaign budget", () => {
   assert.deepEqual(Number(after.free_calls), Number(before.free_calls), "one campaign budget, unchanged by worker count");
   e.close();
 });
+
+test("P2-02: the contest shared provider semaphore takes the configured cap", async () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "runtime.json"), JSON.stringify({ max_inflight_model_calls: 1 }));
+  const factory = new EngineRunnerFactory(dir, { onLog: () => {} });
+  const sem = factory.providerSemaphore();
+  const first = await sem.acquire();
+  const second = sem.acquire();
+  for (let i = 0; i < 10 && (sem.queued as number) !== 1; i += 1) await new Promise((r) => setImmediate(r));
+  assert.equal(sem.queued, 1, "capacity 1 from runtime.json: the second call queues");
+  first.release();
+  (await second).release();
+  factory.dispose();
+});
+
+test("P2-02: contest flags override the shared semaphore cap", async () => {
+  const dir = tmp();
+  const factory = new EngineRunnerFactory(dir, { flags: { "max-inflight-model-calls": "2" }, onLog: () => {} });
+  const sem = factory.providerSemaphore();
+  const a = await sem.acquire();
+  const b = await sem.acquire();
+  assert.equal(sem.active, 2, "capacity 2 from flags: both hold slots");
+  a.release();
+  b.release();
+  factory.dispose();
+});

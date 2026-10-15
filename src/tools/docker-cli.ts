@@ -207,6 +207,9 @@ export class FakeDockerCli implements DockerCli {
       if (argv.some((a) => a.includes("Config.Labels"))) {
         return { stdout: JSON.stringify(this.labels.get(name) ?? {}), stderr: "", code: 0, timedOut: false };
       }
+      if (argv.some((a) => a.includes("{{.Id}}"))) {
+        return { stdout: `cid-${name}`, stderr: "", code: 0, timedOut: false };
+      }
       return { stdout: this.alive.has(name) ? "true" : "false", stderr: "", code: 0, timedOut: false };
     }
     return {
