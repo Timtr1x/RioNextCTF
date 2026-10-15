@@ -365,6 +365,16 @@ export class Engine {
     return this.pollOperations(campaignId, invocationId);
   }
 
+  /** Trusted manual adjudication for an invocation recovery cannot resolve. */
+  adjudicate(
+    campaignId: string,
+    invocationId: string,
+    verdict: "confirmed_not_sent" | "confirmed_completed" | "acknowledged_unknown",
+    note: string,
+  ): { state: string } {
+    return this.dispatchGate.adjudicate(campaignId, invocationId, verdict, note, { kind: "user", id: "cli" });
+  }
+
   async pollOperations(
     campaignId: string,
     invocationId?: string,

@@ -1,6 +1,7 @@
 import { DomainError } from "../domain/errors.ts";
+import { newId } from "../domain/ids.ts";
 import type { EffectClass, InvocationState, RunLease } from "../domain/types.ts";
-import type { EffectAdapter } from "../tools/effect-adapter.ts";
+import { defaultDescriptor, type EffectAdapter, type ExecutionEvidence } from "../tools/effect-adapter.ts";
 import { isKaliPayload } from "../tools/kali-adapter.ts";
 import { isLoopbackHost, parseDestination } from "../tools/egress.ts";
 import type { BudgetLedger } from "./budget-ledger.ts";
@@ -117,7 +118,12 @@ export class DispatchGate {
       if (!this.budget.canAdmit(req.lease.campaign_id, 1, 0, 0)) {
         throw new DomainError("budget_exhausted", "dispatch blocked", "budget");
       }
+      // The execution handle is computed and persisted BEFORE the send — after
+      // a crash the recovery path can query by handle even without a receipt.
+      const invId = newId("inv");
+      const desc = this.adapter.describe?.(invId, req.payload) ?? defaultDescriptor(invId);
       const inv = this.invocations.prepare({
+        id: invId,
         campaign_id: req.lease.campaign_id,
         run_id: req.lease.run_id,
         kind: "tool",
@@ -126,6 +132,7 @@ export class DispatchGate {
         cancel_epoch: req.lease.cancel_epoch,
         effect_class: req.effect,
         reserved_calls: 1,
+        execution_handle: desc.handle,
       });
       if (req.envTool) {
         for (const key of envLockKeys(req.lease.campaign_id, req.payload, req.lease.run_id)) {
@@ -181,7 +188,10 @@ export class DispatchGate {
   /** Record dispatching without sending. Used to simulate crash after permit, before adapter. */
   markDispatchingOnly(req: DispatchRequest): string {
     const r = this.storage.store.transaction(() => {
+      const invId = newId("inv");
+      const desc = this.adapter.describe?.(invId, req.payload) ?? defaultDescriptor(invId);
       const inv = this.invocations.prepare({
+        id: invId,
         campaign_id: req.lease.campaign_id,
         run_id: req.lease.run_id,
         kind: "tool",
@@ -190,6 +200,7 @@ export class DispatchGate {
         cancel_epoch: req.lease.cancel_epoch,
         effect_class: req.effect,
         reserved_calls: 1,
+        execution_handle: desc.handle,
       });
       this.budget.reserve(req.lease.campaign_id, inv.id, 1, 0, 0);
       this.invocations.mark(inv.id, "dispatching");
@@ -198,6 +209,15 @@ export class DispatchGate {
     return r;
   }
 
+  /**
+   * Recovery decision table (H04 §6.7). The load-bearing rules:
+   *  - prepared releases its reservation only when the owning run's send right
+   *    is provably revoked (the run is no longer live); a live run keeps it.
+   *  - dispatching/running/uncertain without a usable handle stays uncertain —
+   *    "no receipt" is not proof of "never sent". Ever.
+   *  - completed/failed/not_started reconcile exactly once per invocation key.
+   *  - Nothing here re-sends; replay decisions belong to a new decide cycle.
+   */
   async recover(
     campaignId: string,
     invocationId?: string,
@@ -214,12 +234,13 @@ export class DispatchGate {
       const id = String(row.id);
       const state = String(row.state) as InvocationState;
       const reserved = Number(row.reserved_calls ?? 0);
+      const runId = row.run_id ? String(row.run_id) : "";
       if (String(row.kind) === "model") {
         // Model invocations belong to the worker's stream lifecycle, not the
         // adapter. Only reconcile orphans whose run already settled; a live
         // run's in-flight stream is none of recover's business.
-        const run = row.run_id
-          ? (this.storage.store.db.prepare("SELECT state FROM task_runs WHERE id = ?").get(String(row.run_id)) as
+        const run = runId
+          ? (this.storage.store.db.prepare("SELECT state FROM task_runs WHERE id = ?").get(runId) as
               | { state: string }
               | undefined)
           : undefined;
@@ -237,63 +258,170 @@ export class DispatchGate {
       // A dispatch still in flight on a run THIS process is driving is not
       // recover's business: its owner will settle it. Crashed runs (not driven
       // here) fall through to the normal liability/uncertain reconciliation.
-      if (row.run_id && activeRunIds?.has(String(row.run_id))) {
+      if (runId && activeRunIds?.has(runId)) {
         continue;
       }
+      const runLive = this.runCurrentlyLive(runId);
       if (state === "prepared") {
-        this.invocations.mark(id, "failed_known", { error: "never_sent" });
+        if (runLive) continue; // the owner may still send; never race it
+        // The send right is revoked with the run: provably never sent.
+        this.invocations.mark(id, "failed_known", { error: "not_dispatched" });
         this.budget.releasePrepared(campaignId, id, reserved, Number(row.reserved_tokens ?? 0), Number(row.reserved_cost ?? 0));
         prepared_released += 1;
-      } else if (state === "dispatching" || state === "running") {
-        const tokens = Number(row.reserved_tokens ?? 0);
-        const cost = Number(row.reserved_cost ?? 0);
-        this.budget.markLiability(campaignId, id, reserved, tokens, cost);
-        const ext = row.external_id ? String(row.external_id) : null;
-        const q = ext ? await (this.adapter.queryAsync ? this.adapter.queryAsync(ext) : this.adapter.query(ext)) : "unknown";
-        if (ext && q === "completed") {
-          this.invocations.mark(id, "reconciled");
-          this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
-          this.storage.releaseResourceLocksForInvocation(campaignId, id);
-          this.storage.updateOperationState(ext, "completed");
-          reconciled += 1;
-        } else if (ext && q === "failed") {
-          this.invocations.mark(id, "failed_known");
-          this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
-          this.storage.releaseResourceLocksForInvocation(campaignId, id);
-          this.storage.updateOperationState(ext, "failed");
-          reconciled += 1;
-        } else if (state === "running" && ext) {
-          this.storage.updateOperationState(ext, "running", new Date(Date.now() + 2_000).toISOString());
-          still_running += 1;
-        } else {
-          this.invocations.mark(id, "uncertain");
-          if (ext) this.storage.updateOperationState(ext, "unknown");
-          marked_uncertain += 1;
-        }
-      } else if (state === "uncertain") {
-        const ext = row.external_id ? String(row.external_id) : null;
-        const reservedCalls = Number(row.reserved_calls ?? 0);
-        if (!ext) {
-          this.invocations.mark(id, "failed_known", { error: "never_sent" });
-          this.budget.reconcileLiability(campaignId, `rec:${id}`, reservedCalls, reservedCalls);
-          this.storage.releaseResourceLocksForInvocation(campaignId, id);
-          reconciled += 1;
-        } else if (ext && (await (this.adapter.queryAsync ? this.adapter.queryAsync(ext) : this.adapter.query(ext))) === "completed") {
-          this.invocations.mark(id, "reconciled");
-          this.budget.reconcileLiability(campaignId, `rec:${id}`, reservedCalls, reservedCalls);
-          this.storage.releaseResourceLocksForInvocation(campaignId, id);
-          this.storage.updateOperationState(ext, "completed");
-          reconciled += 1;
-        } else if (ext && (await (this.adapter.queryAsync ? this.adapter.queryAsync(ext) : this.adapter.query(ext))) === "failed") {
-          this.invocations.mark(id, "failed_known");
-          this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reservedCalls, 0, 0, 0, 0);
-          this.storage.releaseResourceLocksForInvocation(campaignId, id);
-          this.storage.updateOperationState(ext, "failed");
-          reconciled += 1;
-        }
+        continue;
+      }
+      if (state !== "dispatching" && state !== "running" && state !== "uncertain") continue;
+      const tokens = Number(row.reserved_tokens ?? 0);
+      const cost = Number(row.reserved_cost ?? 0);
+      this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+      const handle = row.execution_handle
+        ? String(row.execution_handle)
+        : row.external_id
+          ? String(row.external_id)
+          : null;
+      if (!handle) {
+        // No handle and no receipt: unknowable. Keep the locks and the slot.
+        this.invocations.mark(id, "uncertain", { error: "unqueryable" });
+        this.appendRecoveryEvent(campaignId, id, runId, null, "unqueryable");
+        marked_uncertain += 1;
+        continue;
+      }
+      const ev = await this.queryEvidence(handle);
+      if (ev.status === "running") {
+        this.storage.updateOperationState(handle, "running", new Date(Date.now() + 2_000).toISOString());
+        still_running += 1;
+      } else if (ev.status === "completed") {
+        this.invocations.mark(id, "reconciled");
+        this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
+        this.storage.releaseResourceLocksForInvocation(campaignId, id);
+        this.storage.updateOperationState(handle, "completed");
+        this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, "completed");
+        reconciled += 1;
+      } else if (ev.status === "failed") {
+        // Execution failed; its earlier effects may exist (ev.effect). The
+        // reserved budget converts to liability reconciled at zero proven
+        // spend — never silently zero-cost.
+        this.invocations.mark(id, "failed_known", { error: `evidence:${ev.evidenceRef} effect:${ev.effect}` });
+        this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
+        this.storage.releaseResourceLocksForInvocation(campaignId, id);
+        this.storage.updateOperationState(handle, "failed");
+        this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, `failed:${ev.effect}`);
+        reconciled += 1;
+      } else if (ev.status === "not_started" && !runLive) {
+        // Positive not-started proof AND the send right revoked with the run.
+        this.invocations.mark(id, "failed_known", { error: "not_dispatched" });
+        this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
+        this.storage.releaseResourceLocksForInvocation(campaignId, id);
+        this.storage.updateOperationState(handle, "failed");
+        this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, "not_started");
+        reconciled += 1;
+      } else {
+        // unknown (or a not_started we cannot act on): keep everything.
+        this.invocations.mark(id, "uncertain", { error: ev.status === "unknown" ? ev.reason : "not_started_unrevoked" });
+        this.storage.updateOperationState(handle, "unknown");
+        this.appendRecoveryEvent(campaignId, id, runId, null, ev.status === "unknown" ? ev.reason : "not_started_unrevoked");
+        marked_uncertain += 1;
       }
     }
     return { prepared_released, marked_uncertain, reconciled, still_running };
+  }
+
+  private runCurrentlyLive(runId: string): boolean {
+    if (!runId) return false;
+    const run = this.storage.store.db
+      .prepare("SELECT state, deadline_ms FROM task_runs WHERE id = ?")
+      .get(runId) as { state: string; deadline_ms: number } | undefined;
+    if (!run) return false;
+    return (run.state === "claimed" || run.state === "running") && Number(run.deadline_ms) > Date.now();
+  }
+
+  private async queryEvidence(handle: string): Promise<ExecutionEvidence> {
+    if (this.adapter.queryEvidence) {
+      try {
+        return await this.adapter.queryEvidence(handle);
+      } catch (err) {
+        return { status: "unknown", reason: `query_error:${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+    const q = this.adapter.queryAsync ? await this.adapter.queryAsync(handle) : this.adapter.query(handle);
+    if (q === "completed") return { status: "completed", evidenceRef: "legacy_query" };
+    if (q === "failed") return { status: "failed", evidenceRef: "legacy_query", effect: "possible" };
+    return { status: "unknown", reason: "legacy_query_unknown" };
+  }
+
+  private appendRecoveryEvent(campaignId: string, invocationId: string, runId: string, evidenceRef: string | null, outcome: string): void {
+    // Dedup: the same uncertainty outcome is recorded once per invocation.
+    const last = this.storage.store.db
+      .prepare(
+        "SELECT payload_json FROM events WHERE campaign_id = ? AND entity_id = ? AND type = 'invocation.uncertain' ORDER BY seq DESC LIMIT 1",
+      )
+      .get(campaignId, invocationId) as { payload_json: string } | undefined;
+    if (last) {
+      try {
+        const prev = JSON.parse(last.payload_json) as { outcome?: string };
+        if (prev.outcome === outcome && (outcome === "unqueryable" || evidenceRef === null)) return;
+      } catch {
+        // fall through and record
+      }
+    }
+    this.storage.appendEvent(
+      campaignId,
+      "invocation.uncertain",
+      { invocation_id: invocationId, run_id: runId, handle: evidenceRef, outcome },
+      { kind: "controller", id: "recover" },
+      invocationId,
+    );
+  }
+
+  /**
+   * Trusted manual adjudication for an unresolvable unknown (H04 §6.8).
+   * Records the actor, basis and original state; only "acknowledged_unknown"
+   * keeps the invocation uncertain (it still blocks an ordinary close).
+   * Idempotent per invocation: terminal states are returned unchanged.
+   */
+  adjudicate(
+    campaignId: string,
+    invocationId: string,
+    verdict: "confirmed_not_sent" | "confirmed_completed" | "acknowledged_unknown",
+    note: string,
+    actor: { kind: "user" | "controller"; id: string } = { kind: "user", id: "manual" },
+  ): { state: string } {
+    return this.storage.store.transaction(() => {
+      const inv = this.invocations.get(invocationId);
+      if (String(inv.campaign_id) !== campaignId) {
+        throw new DomainError("cross_campaign_ref", "invocation belongs to another campaign", "denied");
+      }
+      const state = String(inv.state);
+      if (state !== "uncertain" && state !== "dispatching" && state !== "running" && state !== "prepared") {
+        return { state }; // already terminal; adjudication is a no-op
+      }
+      const reservedCalls = Number(inv.reserved_calls ?? 0);
+      const tokens = Number(inv.reserved_tokens ?? 0);
+      const cost = Number(inv.reserved_cost ?? 0);
+      if (verdict === "confirmed_not_sent") {
+        this.invocations.mark(invocationId, "failed_known", { error: `adjudicated:not_sent ${note}`.slice(0, 400) });
+        this.budget.markLiability(campaignId, invocationId, reservedCalls, tokens, cost);
+        this.budget.reconcileLiability(campaignId, `rec:${invocationId}`, 0, reservedCalls, 0, tokens, 0, cost);
+        this.storage.releaseResourceLocksForInvocation(campaignId, invocationId);
+      } else if (verdict === "confirmed_completed") {
+        this.invocations.mark(invocationId, "reconciled", { error: `adjudicated:completed ${note}`.slice(0, 400) });
+        this.budget.markLiability(campaignId, invocationId, reservedCalls, tokens, cost);
+        this.budget.reconcileLiability(campaignId, `rec:${invocationId}`, reservedCalls, reservedCalls, tokens, tokens, cost, cost);
+        this.storage.releaseResourceLocksForInvocation(campaignId, invocationId);
+      } else {
+        // acknowledged_unknown stays uncertain: never rewritten as not-sent,
+        // never evidence of success; the note is the audit trail.
+        this.invocations.mark(invocationId, "uncertain", { error: `acknowledged_unknown ${note}`.slice(0, 400) });
+      }
+      this.storage.appendEvent(
+        campaignId,
+        "invocation.reconciled",
+        { invocation_id: invocationId, verdict, note: note.slice(0, 400), previous_state: state },
+        actor,
+        invocationId,
+      );
+      return { state: String(this.invocations.get(invocationId).state) };
+    });
   }
 
   archiveLateResult(campaignId: string, invocationId: string, body: unknown): void {

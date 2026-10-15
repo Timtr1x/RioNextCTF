@@ -378,7 +378,21 @@ export function registerCampaignRoutes(add: Add, engineHost: EngineHost): void {
 
   add("POST", "/api/campaigns/:id/reconcile", async (ctx) => {
     const id = idOf(ctx);
-    const body = await ctx.json<{ invocation_id?: string }>();
+    const body = await ctx.json<{ invocation_id?: string; verdict?: string; note?: string }>();
+    if (body.verdict) {
+      // Trusted manual adjudication for an invocation recovery cannot resolve.
+      if (!body.invocation_id) throw invalidInput("missing_invocation", "verdict requires invocation_id");
+      if (!["confirmed_not_sent", "confirmed_completed", "acknowledged_unknown"].includes(body.verdict)) {
+        throw invalidInput("bad_verdict", "verdict must be confirmed_not_sent | confirmed_completed | acknowledged_unknown");
+      }
+      const result = engineHost.control.adjudicate(
+        id,
+        body.invocation_id,
+        body.verdict as "confirmed_not_sent" | "confirmed_completed" | "acknowledged_unknown",
+        body.note ?? "",
+      );
+      return { id, invocation_id: body.invocation_id, adjudicated: true, ...result };
+    }
     const result = await engineHost.control.reconcile(id, body.invocation_id);
     return { id, ...result };
   });

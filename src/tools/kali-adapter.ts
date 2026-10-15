@@ -1,5 +1,5 @@
 import { DomainError } from "../domain/errors.ts";
-import type { EffectAdapter } from "./effect-adapter.ts";
+import type { EffectAdapter, ExecutionDescriptor, ExecutionEvidence } from "./effect-adapter.ts";
 import { isKnownKaliBin, shouldBackgroundKali } from "./kali-profile.ts";
 import type { KaliStartOpts, KaliRuntime } from "./kali-runtime.ts";
 
@@ -135,6 +135,46 @@ export class KaliEffectAdapter implements EffectAdapter {
     }
   }
 
+  describe(invocationId: string): ExecutionDescriptor {
+    // The handle is deterministic and pre-persisted in the permit transaction;
+    // kali execution is never blindly replayable.
+    return { handle: `kali_${invocationId}`, queryable: true, replaySafe: false };
+  }
+
+  /** Evidence-grade query (H04 §6.4): a missing container or a missing exit
+   *  record is never proof of not_started. */
+  async queryEvidence(executionId: string): Promise<ExecutionEvidence> {
+    const mem = this.last.get(executionId);
+    if (mem === "completed") return { status: "completed", evidenceRef: "memory" };
+    if (mem === "failed") return { status: "failed", evidenceRef: "memory", effect: "possible" };
+    try {
+      const invId = executionId.startsWith("kali_") ? executionId.slice("kali_".length) : "";
+      if (invId) {
+        const opts = this.optsFor(invId);
+        const box = await this.runtime.inspectCampaignAsync(opts.campaignId);
+        const bg = await this.runtime.backgroundStatusAsync(opts, executionId);
+        const ref = `workspace:.rionext-ops/${executionId}`;
+        if (bg === "completed") {
+          this.last.set(executionId, "completed");
+          return { status: "completed", evidenceRef: ref };
+        }
+        if (bg === "failed") {
+          this.last.set(executionId, "failed");
+          // A nonzero exit says the command failed; it says nothing about the
+          // effects it produced before failing.
+          return { status: "failed", evidenceRef: ref, effect: "possible" };
+        }
+        if (box === "running") return { status: "running", evidenceRef: ref };
+        // container gone or exited, no exit record: the process state is
+        // unknowable from here — never downgrade this to not_started.
+        return { status: "unknown", reason: `container_${box}_no_exit_record` };
+      }
+    } catch (err) {
+      return { status: "unknown", reason: `query_error:${err instanceof Error ? err.message : String(err)}` };
+    }
+    return { status: "unknown", reason: "no_record" };
+  }
+
   query(executionId: string): "unknown" | "completed" | "failed" {
     const mem = this.last.get(executionId);
     if (mem === "completed" || mem === "failed") return mem;
@@ -213,6 +253,18 @@ export class RoutingEffectAdapter implements EffectAdapter {
   queryAsync(executionId: string): Promise<"unknown" | "completed" | "failed"> {
     if (executionId.startsWith("kali_")) return this.kali.queryAsync(executionId);
     return Promise.resolve(this.file.query(executionId));
+  }
+
+  describe(invocationId: string, payload: unknown): ExecutionDescriptor {
+    if (isKaliPayload(payload)) return this.kali.describe(invocationId);
+    return this.file.describe ? this.file.describe(invocationId, payload) : { handle: `ex_${invocationId}`, queryable: true, replaySafe: true };
+  }
+
+  async queryEvidence(executionId: string): Promise<ExecutionEvidence> {
+    if (executionId.startsWith("kali_")) return this.kali.queryEvidence(executionId);
+    if (this.file.queryEvidence) return this.file.queryEvidence(executionId);
+    const q = this.file.query(executionId);
+    return q === "unknown" ? { status: "unknown", reason: "legacy_query" } : { status: q, evidenceRef: "legacy" } as ExecutionEvidence;
   }
 
   sendCount(): number {

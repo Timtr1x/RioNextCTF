@@ -35,13 +35,17 @@ export class InvocationBook {
     reserved_calls?: number;
     reserved_tokens?: number;
     reserved_cost?: number;
+    /** Pre-send execution identity (H04): persisted with the permit. */
+    execution_handle?: string;
+    /** Caller-chosen id (the permit needs the id to describe the handle). */
+    id?: string;
   }): InvocationRecord {
-    const id = newId("inv");
+    const id = args.id ?? newId("inv");
     const now = nowIso();
     this.storage.store.db
       .prepare(
-        `INSERT INTO invocations(id, campaign_id, run_id, kind, purpose, idempotency_key, state, dispatch_epoch, fence, cancel_epoch, effect_class, reserved_cost, reserved_tokens, reserved_calls, prompt_hash, requested_model, provider, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'prepared', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO invocations(id, campaign_id, run_id, kind, purpose, idempotency_key, state, dispatch_epoch, fence, cancel_epoch, effect_class, reserved_cost, reserved_tokens, reserved_calls, prompt_hash, requested_model, provider, execution_handle, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'prepared', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -59,6 +63,7 @@ export class InvocationBook {
         args.prompt_hash ?? null,
         args.requested_model ?? null,
         args.provider ?? null,
+        args.execution_handle ?? null,
         now,
         now,
       );

@@ -25,7 +25,14 @@ export function commitCompletion(engine: Engine, campaignId: string, expectedH: 
     }
     const snap = engine.snapshot(campaignId);
     if (snap.uncertain_invocations > 0) {
-      return { ok: false as const, reason: "uncertain_invocations" };
+      // E19: name the unresolved calls — a plain count is not actionable.
+      const ids = engine.invocations
+        .nonTerminal(campaignId)
+        .filter((i) => i.state === "uncertain")
+        .map((i) => `${String(i.id)}(${String(i.error_json ?? "uncertain").slice(0, 80)})`)
+        .slice(0, 8)
+        .join(",");
+      return { ok: false as const, reason: `uncertain_invocations:${ids}` };
     }
     if (camp.event_head !== expectedH) {
       return { ok: false as const, reason: "cas_conflict" };

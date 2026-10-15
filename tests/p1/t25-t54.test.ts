@@ -98,8 +98,13 @@ test("T26 prepared crash releases reserve without adapter send", async () => {
     reserved_calls: 1,
   });
   e.budget.reserve("t26", inv.id, 1, 0, 0);
+  // The process dies; the lease TTL lapses; the run is revoked — only then is
+  // the prepared send right provably gone (H04 §6.7).
   e.close();
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1, effectAdapter: adapter });
+  e2.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = 0 WHERE campaign_id = ?").run("t26");
+  e2.storage.store.db.prepare("UPDATE controller_locks SET lease_until = 0 WHERE campaign_id = ?").run("t26");
+  e2.storage.recoverStaleRuns("t26");
   const gate = new DispatchGate(e2.storage, e2.budget, new InvocationBook(e2.storage), adapter);
   const rec = await gate.recover("t26");
   assert.equal(rec.prepared_released, 1);

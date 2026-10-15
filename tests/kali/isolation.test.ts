@@ -215,7 +215,7 @@ test("kali_start protocol_error is failed_known and drops the workspace lock", (
   assert.equal(String(e.invocations.get(sent.invocation_id).state), "failed_known");
 });
 
-test("recover drops workspace lock when uncertain kali never got an external_id", async () => {
+test("recover keeps the workspace lock while an uncertain kali call is unqueryable", async () => {
   const dir = tmp();
   const docker = new FakeDockerCli();
   const e = kaliEngine(dir, docker);
@@ -236,10 +236,47 @@ test("recover drops workspace lock when uncertain kali never got an external_id"
   e.budget.markLiability("t-rec", inv.id, 1, 0, 0);
   e.invocations.mark(inv.id, "uncertain", { error: "generic boom" });
   assert.equal(e.storage.acquireResourceLock("t-rec", "workspace:t-rec", inv.id, false), true);
+  // No execution handle and no receipt: the effect may have landed. The old
+  // "no external_id => never_sent" inference is gone — the lock stays.
   const rec = await e.dispatchGate.recover("t-rec");
-  assert.equal(rec.reconciled >= 1, true);
-  assert.equal(e.storage.listResourceLocks("t-rec").length, 0);
-  assert.equal(String(e.invocations.get(inv.id).state), "failed_known");
+  assert.equal(rec.reconciled, 0);
+  assert.equal(String(e.invocations.get(inv.id).state), "uncertain");
+  assert.equal(e.storage.listResourceLocks("t-rec").length, 1, "the lock is kept while the outcome is unknown");
+  e.close();
+});
+
+test("recover with a persisted handle reconciles by evidence without resending", async () => {
+  const dir = tmp();
+  const docker = new FakeDockerCli();
+  const e = kaliEngine(dir, docker);
+  const spec = loadKaliSpec("t-rec2");
+  e.createCampaign(spec);
+  const lease = kaliLease(e, "t-rec2");
+  const handle = "kali_inv_rec2";
+  const inv = e.invocations.prepare({
+    id: "inv_rec2",
+    campaign_id: "t-rec2",
+    run_id: lease.run_id,
+    kind: "tool",
+    purpose: "kali_run",
+    fence: lease.fence,
+    cancel_epoch: lease.cancel_epoch,
+    effect_class: "unknown",
+    reserved_calls: 1,
+    execution_handle: handle,
+  });
+  e.budget.reserve("t-rec2", inv.id, 1, 0, 0);
+  e.invocations.mark(inv.id, "dispatching");
+  assert.equal(e.storage.acquireResourceLock("t-rec2", "workspace:t-rec2", inv.id, false), true);
+  // The command actually finished: its exit record exists in the workspace.
+  const opsDir = join(dir, "workspace", "t-rec2", ".rionext-ops");
+  mkdirSync(opsDir, { recursive: true });
+  writeFileSync(join(opsDir, `${handle}.exit`), "0");
+  const rec = await e.dispatchGate.recover("t-rec2");
+  assert.equal(rec.reconciled, 1);
+  assert.equal(String(e.invocations.get(inv.id).state), "reconciled");
+  assert.equal(e.storage.listResourceLocks("t-rec2").length, 0, "reconciled releases the lock");
+  e.close();
 });
 
 test("kali argv rejects unknown binaries and shell metacharacters", () => {
