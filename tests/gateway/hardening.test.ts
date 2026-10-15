@@ -85,6 +85,9 @@ test("a queued model call times out at the lease instead of waking past it", asy
   const e = boot("hard-sem");
   const run = e.storage.claimDecideAsOwner("hard-sem", "t")!;
   const lease: RunLease = { ...mkLease(run.run_id, "hard-sem", run.fence), deadline_ms: Date.now() + 200 };
+  // The database row is the authority: expire the run's real lease, so the
+  // queue watch fires even though the slot never frees.
+  e.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = ? WHERE id = ?").run(Date.now() + 200, run.run_id);
   // exhaust the only slot
   const sem = new Semaphore(1);
   await sem.acquire();

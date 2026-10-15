@@ -6,8 +6,8 @@ import type { EffectClass, RunLease } from "../domain/types.ts";
 import { createScriptedErrorStream } from "../runtime/pi/scripted-stream.ts";
 import type { StorageService } from "../storage/service.ts";
 import { BudgetLedger } from "./budget-ledger.ts";
-import { runWithOuterDeadline } from "./deadline.ts";
-import { QueueDeadlineError, type Permit, type Semaphore } from "./semaphore.ts";
+import { leaseWatchSignal, runWithLeaseWatch } from "./deadline.ts";
+import type { Permit, Semaphore } from "./semaphore.ts";
 import type { DispatchGate } from "./dispatch.ts";
 import { InvocationBook, type InvocationRecord } from "./invocation.ts";
 import { assertSafeToolPath, isPolicyInjectionText } from "./sandbox.ts";
@@ -163,13 +163,22 @@ export class ModelGateway {
   ): Promise<AssistantMessageEventStream> {
     let permit: Permit | null = null;
     if (this.sem) {
+      // Queue with the real call signal plus a lease watcher that follows the
+      // database deadline: an aborted worker leaves the queue immediately, and
+      // a live worker's renewals never strand a queued call behind a stale TTL.
+      const callSignal = (callOpts as { signal?: AbortSignal } | null)?.signal;
+      const watch = leaseWatchSignal(this.storage, this.lease.run_id);
+      const queueSignal = callSignal ? AbortSignal.any([callSignal, watch.signal]) : watch.signal;
       try {
-        permit = await this.sem.acquire({ deadlineAt: this.lease.deadline_ms });
+        permit = await this.sem.acquire({ signal: queueSignal });
       } catch (err) {
+        watch.stop();
         // Never granted => provably never sent: release the reservation.
-        settle.neverSent(err instanceof QueueDeadlineError ? "lease_expired" : "queue_aborted");
-        return errorStream(callModel, err instanceof QueueDeadlineError ? "lease_expired" : "queue_aborted");
+        const reason = watch.signal.aborted ? "lease_expired" : "queue_aborted";
+        settle.neverSent(reason);
+        return errorStream(callModel, reason);
       }
+      watch.stop();
     }
     // Whether or not a queue exists, revalidate against the database right
     // before sending (H01 §3.4 step 4): a campaign paused/cancelled or a run
@@ -353,16 +362,15 @@ export class ToolGateway {
       if (!this.dispatchGate) {
         return { invocation_id: "none", blocked: true, reason: "no_dispatch_gate", allowed: false };
       }
-      const ms = Math.max(1, this.lease.deadline_ms - Date.now());
       try {
-        const timed = await runWithOuterDeadline(ms, (deadlineSignal) =>
+        const timed = await runWithLeaseWatch(this.storage, this.lease.run_id, (deadlineSignal) =>
           this.dispatchGate!.dispatchAsync({
             lease: this.lease,
             purpose: req.name,
             payload: req.args,
             effect: req.effect,
             envTool: true,
-            // worker abort OR the outer deadline kills just this invocation's process
+            // worker abort OR the run's real lease lapse kills just this invocation
             signal: req.signal ? AbortSignal.any([req.signal, deadlineSignal]) : deadlineSignal,
           }),
         );
@@ -420,10 +428,22 @@ export class ToolGateway {
 }
 
 function admissionDeadline(storage: StorageService, lease: RunLease): string | null {
-  if (Date.now() > lease.deadline_ms) return "lease_expired";
+  // The lease object is a snapshot taken at claim time; heartbeat renewals move
+  // only the database row. Authority is the row: deadline <= now is expired.
+  const dbDeadline = freshRunDeadlineMs(storage, lease);
+  if (Date.now() >= dbDeadline) return "lease_expired";
   const camp = storage.getCampaign(lease.campaign_id);
-  if (camp.spec.budget.deadline_ms != null && Date.now() > camp.spec.budget.deadline_ms) return "campaign_deadline";
+  if (camp.spec.budget.deadline_ms != null && Date.now() >= Number(camp.spec.budget.deadline_ms)) return "campaign_deadline";
   return null;
+}
+
+/** Current database deadline for the lease's run; 0 when unreadable (expired). */
+function freshRunDeadlineMs(storage: StorageService, lease: RunLease): number {
+  try {
+    return Number(storage.getRun(lease.run_id).deadline_ms);
+  } catch {
+    return 0;
+  }
 }
 
 interface SettleMessage {
