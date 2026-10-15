@@ -110,6 +110,8 @@ test("S11: a stream whose result rejects still frees the slot with no unhandled 
   assert.equal(sem.active, 0, "slot freed on terminal rejection");
   const snap = e.budget.snapshot("s11");
   assert.equal(Number(snap.reserved_tokens), 0);
+  assert.equal(Number(snap.spent_tokens), 16, "sent-but-unanswered is charged at the reserve, never zero");
+  assert.equal(Number(snap.liability_tokens), 0);
   const inv = e.storage.list("invocations", "s11")[0]!;
   assert.equal(inv.state, "failed_known");
   e.close();

@@ -103,6 +103,33 @@ export class InvocationBook {
     }
   }
 
+  /**
+   * Compare-and-set: apply the transition only when the invocation is still in
+   * one of `fromStates`. A terminal state reached by anyone else wins — a late
+   * callback or a stale recovery query can never roll it back (P1-03/P1-04).
+   */
+  markCas(id: string, fromStates: readonly InvocationState[], toState: InvocationState, extra?: Record<string, unknown>): boolean {
+    const actualTokens = typeof extra?.actual_tokens === "number" ? extra.actual_tokens : null;
+    const actualCost = typeof extra?.actual_cost === "number" ? extra.actual_cost : null;
+    const placeholders = fromStates.map(() => "?").join(",");
+    const row = this.storage.store.db
+      .prepare(
+        `UPDATE invocations SET state = ?, status = ?, error_json = ?, actual_tokens = COALESCE(?, actual_tokens), actual_cost = COALESCE(?, actual_cost), updated_at = ?
+         WHERE id = ? AND state IN (${placeholders})`,
+      )
+      .run(
+        toState,
+        String(extra?.status ?? toState),
+        extra?.error ? JSON.stringify(extra.error) : null,
+        actualTokens,
+        actualCost,
+        nowIso(),
+        id,
+        ...fromStates,
+      );
+    return Number(row.changes) > 0;
+  }
+
   setExternalId(id: string, executionId: string): void {
     this.storage.store.db.prepare("UPDATE invocations SET external_id = ?, updated_at = ? WHERE id = ?").run(executionId, nowIso(), id);
   }

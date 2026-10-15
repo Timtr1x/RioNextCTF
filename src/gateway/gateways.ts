@@ -497,11 +497,27 @@ class SettleOnce {
     this.budget.settle(this.campaignId, this.inv.id, 1, 0, 0, this.inv.reserved_calls, this.inv.reserved_tokens, this.inv.reserved_cost);
   }
 
+  /**
+   * Transport-level failure AFTER the stream was created — the provider may
+   * have processed the request but never answered. That is not proof of zero
+   * tokens (P1-03): charge conservatively at the reserve, exactly like the
+   * orphaned-call recovery path.
+   */
   err(err: unknown): void {
     if (this.done) return;
     this.done = true;
     this.invocations.mark(this.inv.id, "failed_known", { error: String(err) });
-    this.budget.settle(this.campaignId, this.inv.id, 1, 0, 0, this.inv.reserved_calls, this.inv.reserved_tokens, this.inv.reserved_cost);
+    this.budget.markLiability(this.campaignId, this.inv.id, this.inv.reserved_calls, this.inv.reserved_tokens, this.inv.reserved_cost);
+    this.budget.reconcileLiability(
+      this.campaignId,
+      `rec:${this.inv.id}`,
+      this.inv.reserved_calls,
+      this.inv.reserved_calls,
+      this.inv.reserved_tokens,
+      this.inv.reserved_tokens,
+      this.inv.reserved_cost,
+      this.inv.reserved_cost,
+    );
   }
 }
 

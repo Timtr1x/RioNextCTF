@@ -45,6 +45,8 @@ export interface DispatchResult {
   invocation_id: string;
   execution_id?: string;
   pending?: boolean;
+  /** The invocation was already settled elsewhere; this answer only annotated. */
+  late?: boolean;
 }
 
 export class DispatchGate {
@@ -151,42 +153,66 @@ export class DispatchGate {
     });
   }
 
+  /**
+   * Settlement after the adapter answers. Everything — state CAS, receipt
+   * write, budget transition, lock release — happens in ONE short transaction
+   * per invocation (P1-03): if recovery or anyone else already settled, the
+   * late answer only annotates evidence and never settles a second time.
+   */
   private afterSend(req: DispatchRequest, invocationId: string, sent: { execution_id: string; pending?: boolean }): DispatchResult {
-    this.invocations.mark(invocationId, "running", { status: sent.execution_id });
-    this.storage.store.db
-      .prepare("UPDATE invocations SET external_id = ?, updated_at = datetime('now') WHERE id = ?")
-      .run(sent.execution_id, invocationId);
+    const late = (): DispatchResult => {
+      this.archiveLateResult(req.lease.campaign_id, invocationId, { execution_id: sent.execution_id, pending: sent.pending ?? false });
+      return { status: "sent", invocation_id: invocationId, execution_id: sent.execution_id, pending: sent.pending, late: true };
+    };
     if (sent.pending) {
-      const next = new Date(Date.now() + 2_000).toISOString();
-      this.storage.registerOperation(req.lease.campaign_id, invocationId, sent.execution_id, "running");
-      this.storage.updateOperationState(sent.execution_id, "running", next);
-      return {
-        status: "sent",
-        invocation_id: invocationId,
-        execution_id: sent.execution_id,
-        pending: true,
-      };
+      return this.storage.store.transaction(() => {
+        if (!this.invocations.markCas(invocationId, ["dispatching"], "running", { status: sent.execution_id })) return late();
+        this.storage.store.db
+          .prepare("UPDATE invocations SET external_id = ?, updated_at = datetime('now') WHERE id = ?")
+          .run(sent.execution_id, invocationId);
+        const next = new Date(Date.now() + 2_000).toISOString();
+        this.storage.registerOperation(req.lease.campaign_id, invocationId, sent.execution_id, "running");
+        this.storage.updateOperationState(sent.execution_id, "running", next);
+        return { status: "sent", invocation_id: invocationId, execution_id: sent.execution_id, pending: true } as DispatchResult;
+      });
     }
-    this.storage.registerOperation(req.lease.campaign_id, invocationId, sent.execution_id, "completed");
-    this.invocations.mark(invocationId, "completed");
-    this.budget.settle(req.lease.campaign_id, invocationId, 1, 0, 0, 1, 0, 0);
-    this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, invocationId);
-    return { status: "sent", invocation_id: invocationId, execution_id: sent.execution_id };
+    return this.storage.store.transaction(() => {
+      if (!this.invocations.markCas(invocationId, ["dispatching", "running"], "completed")) return late();
+      this.storage.store.db
+        .prepare("UPDATE invocations SET external_id = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(sent.execution_id, invocationId);
+      this.storage.registerOperation(req.lease.campaign_id, invocationId, sent.execution_id, "completed");
+      this.budget.settle(req.lease.campaign_id, invocationId, 1, 0, 0, 1, 0, 0);
+      this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, invocationId);
+      return { status: "sent", invocation_id: invocationId, execution_id: sent.execution_id } as DispatchResult;
+    });
   }
 
-  private sendFailed(req: DispatchRequest, invocationId: string, err: unknown): DispatchResult {
+  /** Terminal settlement for an adapter failure. Public so late callbacks and
+   *  recovery flows share the same CAS commit as the normal path (P1-03). */
+  sendFailed(req: DispatchRequest, invocationId: string, err: unknown): DispatchResult {
     if (
       err instanceof DomainError &&
       (err.category === "denied" || err.category === "invalid_input" || err.category === "protocol_error")
     ) {
-      this.invocations.mark(invocationId, "failed_known", { error: String(err) });
-      this.budget.settle(req.lease.campaign_id, invocationId, 1, 0, 0, 1, 0, 0);
-      this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, invocationId);
-      return { status: "rejected", reason: `${err.code}:${err.message}`, invocation_id: invocationId };
+      return this.storage.store.transaction(() => {
+        if (!this.invocations.markCas(invocationId, ["dispatching", "running"], "failed_known", { error: String(err) })) {
+          this.archiveLateResult(req.lease.campaign_id, invocationId, { error: String(err), note: "already settled" });
+          return { status: "rejected", reason: "already_settled", invocation_id: invocationId } as DispatchResult;
+        }
+        this.budget.settle(req.lease.campaign_id, invocationId, 1, 0, 0, 1, 0, 0);
+        this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, invocationId);
+        return { status: "rejected", reason: `${err.code}:${err.message}`, invocation_id: invocationId } as DispatchResult;
+      });
     }
-    this.invocations.mark(invocationId, "uncertain", { error: String(err) });
-    this.budget.markLiability(req.lease.campaign_id, invocationId, 1, 0, 0);
-    return { status: "in_flight", reason: String(err), invocation_id: invocationId };
+    return this.storage.store.transaction(() => {
+      if (!this.invocations.markCas(invocationId, ["dispatching", "running"], "uncertain", { error: String(err) })) {
+        this.archiveLateResult(req.lease.campaign_id, invocationId, { error: String(err), note: "already settled" });
+        return { status: "in_flight", reason: "already_settled", invocation_id: invocationId } as DispatchResult;
+      }
+      this.budget.markLiability(req.lease.campaign_id, invocationId, 1, 0, 0);
+      return { status: "in_flight", reason: String(err), invocation_id: invocationId } as DispatchResult;
+    });
   }
 
   /** Record dispatching without sending. Used to simulate crash after permit, before adapter. */
@@ -249,13 +275,15 @@ export class DispatchGate {
               | undefined)
           : undefined;
         if (!run || (String(run.state) !== "claimed" && String(run.state) !== "running")) {
-          this.invocations.mark(id, "failed_known", { error: "run_settled" });
-          // An orphaned model call whose run settled without settling the
-          // stream: assume it was charged, reconcile the reserve honestly.
           const tokens = Number(row.reserved_tokens ?? 0);
           const cost = Number(row.reserved_cost ?? 0);
-          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
-          this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
+          this.storage.store.transaction(() => {
+            if (!this.invocations.markCas(id, ["prepared", "dispatching", "running", "uncertain"], "failed_known", { error: "run_settled" })) return;
+            // An orphaned model call whose run settled without settling the
+            // stream: assume it was charged, reconcile the reserve honestly.
+            this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+            this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
+          });
         }
         continue;
       }
@@ -269,15 +297,17 @@ export class DispatchGate {
       if (state === "prepared") {
         if (runLive) continue; // the owner may still send; never race it
         // The send right is revoked with the run: provably never sent.
-        this.invocations.mark(id, "failed_known", { error: "not_dispatched" });
-        this.budget.releasePrepared(campaignId, id, reserved, Number(row.reserved_tokens ?? 0), Number(row.reserved_cost ?? 0));
-        prepared_released += 1;
+        const won = this.storage.store.transaction(() => {
+          if (!this.invocations.markCas(id, ["prepared"], "failed_known", { error: "not_dispatched" })) return false;
+          this.budget.releasePrepared(campaignId, id, reserved, Number(row.reserved_tokens ?? 0), Number(row.reserved_cost ?? 0));
+          return true;
+        });
+        if (won) prepared_released += 1;
         continue;
       }
       if (state !== "dispatching" && state !== "running" && state !== "uncertain") continue;
       const tokens = Number(row.reserved_tokens ?? 0);
       const cost = Number(row.reserved_cost ?? 0);
-      this.budget.markLiability(campaignId, id, reserved, tokens, cost);
       const handle = row.execution_handle
         ? String(row.execution_handle)
         : row.external_id
@@ -285,46 +315,81 @@ export class DispatchGate {
           : null;
       if (!handle) {
         // No handle and no receipt: unknowable. Keep the locks and the slot.
-        this.invocations.mark(id, "uncertain", { error: "unqueryable" });
-        this.appendRecoveryEvent(campaignId, id, runId, null, "unqueryable");
-        marked_uncertain += 1;
+        const won = this.storage.store.transaction(() => {
+          if (!this.invocations.markCas(id, ["dispatching", "running", "uncertain"], "uncertain", { error: "unqueryable" })) return false;
+          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+          return true;
+        });
+        if (won) {
+          this.appendRecoveryEvent(campaignId, id, runId, null, "unqueryable");
+          marked_uncertain += 1;
+        }
         continue;
       }
       const ev = await this.queryEvidence(handle);
       if (ev.status === "running") {
-        this.storage.updateOperationState(handle, "running", new Date(Date.now() + 2_000).toISOString());
+        this.storage.store.transaction(() => {
+          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+          this.storage.updateOperationState(handle, "running", new Date(Date.now() + 2_000).toISOString());
+        });
         still_running += 1;
       } else if (ev.status === "completed") {
-        this.invocations.mark(id, "reconciled");
-        this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
-        this.storage.releaseResourceLocksForInvocation(campaignId, id);
-        this.storage.updateOperationState(handle, "completed");
-        this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, "completed");
-        reconciled += 1;
+        const won = this.storage.store.transaction(() => {
+          if (!this.invocations.markCas(id, ["dispatching", "running", "uncertain"], "reconciled")) return false;
+          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+          this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          this.storage.updateOperationState(handle, "completed");
+          return true;
+        });
+        if (won) {
+          this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, "completed");
+          reconciled += 1;
+        }
       } else if (ev.status === "failed") {
         // Execution failed; its earlier effects may exist (ev.effect). The
         // reserved budget converts to liability reconciled at zero proven
         // spend — never silently zero-cost.
-        this.invocations.mark(id, "failed_known", { error: `evidence:${ev.evidenceRef} effect:${ev.effect}` });
-        this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
-        this.storage.releaseResourceLocksForInvocation(campaignId, id);
-        this.storage.updateOperationState(handle, "failed");
-        this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, `failed:${ev.effect}`);
-        reconciled += 1;
+        const won = this.storage.store.transaction(() => {
+          if (!this.invocations.markCas(id, ["dispatching", "running", "uncertain"], "failed_known", { error: `evidence:${ev.evidenceRef} effect:${ev.effect}` })) return false;
+          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+          this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          this.storage.updateOperationState(handle, "failed");
+          return true;
+        });
+        if (won) {
+          this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, `failed:${ev.effect}`);
+          reconciled += 1;
+        }
       } else if (ev.status === "not_started" && !runLive) {
         // Positive not-started proof AND the send right revoked with the run.
-        this.invocations.mark(id, "failed_known", { error: "not_dispatched" });
-        this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
-        this.storage.releaseResourceLocksForInvocation(campaignId, id);
-        this.storage.updateOperationState(handle, "failed");
-        this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, "not_started");
-        reconciled += 1;
+        const won = this.storage.store.transaction(() => {
+          if (!this.invocations.markCas(id, ["dispatching", "running", "uncertain"], "failed_known", { error: "not_dispatched" })) return false;
+          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+          this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          this.storage.updateOperationState(handle, "failed");
+          return true;
+        });
+        if (won) {
+          this.appendRecoveryEvent(campaignId, id, runId, ev.evidenceRef, "not_started");
+          reconciled += 1;
+        }
       } else {
-        // unknown (or a not_started we cannot act on): keep everything.
-        this.invocations.mark(id, "uncertain", { error: ev.status === "unknown" ? ev.reason : "not_started_unrevoked" });
-        this.storage.updateOperationState(handle, "unknown");
-        this.appendRecoveryEvent(campaignId, id, runId, null, ev.status === "unknown" ? ev.reason : "not_started_unrevoked");
-        marked_uncertain += 1;
+        // unknown (or a not_started we cannot act on): keep everything. The CAS
+        // means a stale query can never roll back a terminal state a peer or a
+        // late callback already reached (P1-04).
+        const won = this.storage.store.transaction(() => {
+          if (!this.invocations.markCas(id, ["dispatching", "running", "uncertain"], "uncertain", { error: ev.status === "unknown" ? ev.reason : "not_started_unrevoked" })) return false;
+          this.budget.markLiability(campaignId, id, reserved, tokens, cost);
+          this.storage.updateOperationState(handle, "unknown");
+          return true;
+        });
+        if (won) {
+          this.appendRecoveryEvent(campaignId, id, runId, null, ev.status === "unknown" ? ev.reason : "not_started_unrevoked");
+          marked_uncertain += 1;
+        }
       }
     }
     return { prepared_released, marked_uncertain, reconciled, still_running };
