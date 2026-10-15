@@ -1,6 +1,6 @@
 # RioNext 多 Worker 稳定化：验收映射（C01–C09）
 
-> 基线 `087cda3`；最终测试：`npm test` 512 通过 / 0 失败 / 2 跳过（2026-10-15，Node v24.12.0，Windows）；`npm run build` 通过（tsc + vite）。
+> 基线 `087cda3`；C01–C09 落地后又完成一轮针对 26866d6 独立复核的 F1–F4 修复（P1-01…P1-05、P2-01/02，见 stabilization 文档末节）。最终测试：`npm test` 528 通过 / 0 失败 / 2 跳过（2026-10-15，Node v24.12.0，Windows）；`npm run build` 通过（tsc + vite）。
 > 真实 Docker 验收：`node tests/docker-acceptance.mjs`，镜像 `rionext-kali:rolling` = sha256:8735af706f79721906d27fd1d04699519cbb1e6aa1e46a50d1f44436565a699e（既有镜像；本轮 pw-daemon.mjs 改动未包含在内），结果记录 docs/acceptance/docker-2026-10-15.json。
 
 ## H01 信号量（tests/gateway/semaphore.test.ts, model-lifecycle.test.ts）
@@ -10,7 +10,7 @@
 | S01 交接复现（容量 1，A 释放后 C 同栈抢槽） | ✔ B 原子获槽，active 恒 ≤1 |
 | S02 排队超时 | ✔ B 不获槽，终态 active=0/queued=0 |
 | S03 入队前已 abort | ✔ 不入队不占槽 |
-| S04 排队中 abort | ✔ Promise 终结，移出队列，预留释放 |
+| S04 排队中 abort | ✔ Promise 终结，移出队列，预留释放；F1 起 ModelGateway 真实透传调用 signal（lease-freshness P2-01 用例：排队 abort 后 Provider 发送次数=0、预留释放） |
 | S05 grant vs abort 同轮 | ✔ 单一胜者 |
 | S06 grant vs deadline 同轮 | ✔ 一次授予或一次拒绝 |
 | S07 重复 release | ✔ 不为负、不多唤醒 |
@@ -20,7 +20,7 @@
 | S11 result 拒绝 | ✔ 槽归还，错误被消费，无 unhandled rejection |
 | S12 业务方不调 result | ✔ 网关观察者照常归还与结算 |
 | S13 多消费方 result | ✔ 不重复释放、不重复记账 |
-| S14 排队期间战役取消 | ✔ 获槽后重验失败，Provider 发送次数=0 |
+| S14 排队期间战役取消 | ✔ 获槽后重验失败，Provider 发送次数=0；F1 起排队等待跟随数据库真实租约（活续租不断路、真失权即拒绝，lease-freshness P1-01 三用例） |
 | S15 abort 未终结 | ✔ 槽位保留到真实终结 |
 | S16 200 轮混合排队/超时/取消 | ✔ 计数归零，无累积 |
 
@@ -53,8 +53,8 @@
 | L07 到期 Run heartbeat | ✔ 不复活不延长 |
 | L08 容量 1 回收后新 Run，再旧 heartbeat | ✔ 有效活跃 Run 不变 2 |
 | L09 Controller 先过期 Run 未到期 | ✔ 模型与 env 发送均拒绝（controller_lost），发送次数=0 |
-| L10 旧 Lease 直写 Storage | ✔ 表驱动覆盖 observation/fact/finding/propose_step/propose_plan/checkpoint/finish 全部拒绝 |
-| L11 旧 Lease finishRun | ✔ 不改新 Step、不动新 active_run_id |
+| L10 旧 Lease 直写 Storage | ✔ 表驱动覆盖全部入口；F2 起同时拦截「DB 已到期、状态仍 running」的写入与发送（wf-expired 用例） |
+| L11 旧 Lease finishRun | ✔ 不改新 Step、不动新 active_run_id；F2 起「原 Run 仍 running 但 Controller 已被接管」的 finishRun 同样 applied=false（wf-takeover 用例） |
 | L12 合法 finish 重复提交 | ✔ 幂等（F09 亦覆盖） |
 | L13 双连接同时 claim 同 Step | ✔ CAS 唯一胜者（T28） |
 | L14 双连接容量边界/Decide-Execute 竞争 | ✔ 不超上限、不重叠、无半写 |
@@ -75,17 +75,17 @@
 | E04 permit 提交后适配器未调 | ✔ 无正向未执行证据→保持 uncertain |
 | E05 效果后、external_id 写入前终止 | ✔ 依预存 handle 找回（isolation 新用例） |
 | E06 afterSend 后、结算前终止 | ✔ 重启只结算一次 |
-| E07 两个恢复者竞争同一终结 | ✔ 幂等键阻止双结算 |
-| E08 终结后旧回调返回 | ✔ 只注释归档，预算不变 |
+| E07 两个恢复者竞争同一终结 | ✔ 幂等键阻止双结算；F3 起补「completed 先、unknown 后」与「failed/completed 冲突」的陈旧回写防护（late-settlement P1-04 两用例） |
+| E08 终结后旧回调返回 | ✔ 只注释归档，预算不变；F3 起覆盖生产路径：真实 Deferred sendAsync 先效果、后恢复、再返回——效果=1、结算=1（late-settlement P1-03 两用例） |
 | E09 查询超时/损坏回执/容器缺失 | ✔ 保持 unknown（含 corrupt record） |
 | E10 可靠 not_started 且发送权已撤 | ✔ 释放，可由新决策重试 |
 | E11 失败前已发生部分效果 | ✔ failed_known 保留 effect:possible |
 | E12 模型断连缺 usage | ✔ 按预留保守入账，不按零 |
 | E13 同 invocation 并发/重启重发文件适配器 | ✔ 实际效果只一次 |
 | E14 非幂等适配器未知结果 | ✔ 自动重试次数=0 |
-| E15 前台/后台 Kali 分别崩溃 | ✔ 两类都有持久执行记录可查（重启后新 Runtime 读得到） |
+| E15 前台/后台 Kali 分别崩溃 | ✔ 两类都有持久执行记录可查；F4 起补「探测失败/空输出/身份不符/unknown 取消」负路径（exec-record P1-05 四用例） |
 | E16 PID/容器名复用 | ✔ 身份不符不发信号 |
-| E17 取消宿主 docker CLI | ✔ 探容器进程组，未确认前不解锁；真实 Docker D05 复核 |
+| E17 取消宿主 docker CLI | ✔ 探容器进程组，未确认前不解锁；真实 Docker D05 复核；F4 起探测本身失败=unknown，unknown 不写 ended |
 | E18 结算 calls/tokens/cost | ✔ 幂等且守恒（E01/E06 断言） |
 | E19 未解决调用普通收口 | ✔ 阻塞并列出 invocation id |
 | E20 受信人工裁决 | ✔ 记录 Actor/依据/原状态；acknowledged_unknown 不写成未发送 |
@@ -100,7 +100,7 @@
 | U04 创建后重启进程 start | ✔ 持久化请求值仍 2 |
 | U05 Web 创建 2 + 运行配置 2 | ✔ EngineHost 实际得 2（runtime.json 驱动），创建接受 workers |
 | U06 Web 服务重启 | ✔ 运行配置按规则恢复 |
-| U07 Contest slots 与 workers 区分 | ✔ workers 落进每题 spec，共享进程信号量 |
+| U07 Contest slots 与 workers 区分 | ✔ workers 落进每题 spec；F4 起共享信号量取配置上限并有非默认容量行为断言（P2-02 两用例） |
 | U08 flags/env/file/default 优先级 | ✔ 唯一顺序 |
 | U09 workers 非法 | ✔ CLI/API/Spec 同一错误语义 |
 | U10 运行上限非法/配置损坏 | ✔ 启动失败，无部分创建 |

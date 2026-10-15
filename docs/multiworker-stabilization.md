@@ -60,3 +60,15 @@
 - D04 真实双 Run 浏览器并行：本机 Docker 不解析 host.docker.internal，跳过（环境限制）；按会话隔离在 fake 层与既有隔离测试覆盖，pw-daemon 合并启动随下次镜像构建生效。
 - D08 单双 Worker 真实模型配对：无可用模型凭据，未跑；docs/multiworker-benchmark.md 记录可复跑的 harness 与指标定义，不填假数字。
 - pw-daemon.mjs 的 launch 合并：需要重建镜像（`npm run kali:build`）才进入运行环境。
+
+## 复核修复轮（F1–F4，针对 26866d6 的独立复核）
+
+| 复核问题 | 修复 |
+| --- | --- |
+| P1-01 续租后准入仍用初始 deadline 快照 | 模型/工具准入与排队上限改读数据库 task_runs.deadline_ms（deadline <= now 为过期）；新增 leaseWatchSignal 轮询真实租约，活 Worker 续租不断路，死 Worker 调用在一个轮询周期内终止；战役硬截止仍压一切续租 |
+| P1-02 finish/写入/发送权限不全 | assertWorkerWrite 增查 DB deadline；dispatch permit 增查到期判定；finishRun 的 expected 路径增验「该 generation 当前仍持锁」；ingestToolOutputAsData 全程带 lease，失权 Run 的原始转储丢弃不写 |
+| P1-03 恢复后真实迟到 sendAsync 双记账 | afterSend/sendFailed 把状态 CAS、回执写入、预算转换、锁释放放进同一短事务；已终结的迟到返回只做证据注释；sendFailed 提为公开统一入口；SettleOnce.err 对已发送未应答按预留保守入账（不再按零） |
+| P1-04 两恢复者不同结论回写终态 | InvocationBook.markCas：恢复结论全部从非终态 CAS 转换；陈旧 unknown 不能回退 reconciled/failed_known；首写者赢 |
+| P1-05 Docker 查询/取消被当成确定结束 | backgroundStatus(Async) 无退出记录时容器缺失=unknown；cancelExecution 仅在显式正向探测（dead / 容器已停 / 组已灭）时确认，探测错误、空输出、身份不符一律 unknown 且不写 ended；执行记录绑定容器 ID，名称复用拒发信号 |
+| P2-01 ModelGateway 未传 AbortSignal | sendGated 用调用方 signal（agent loop options.signal）+ leaseWatch 联合等待；排队中取消立即移除并按未发送释放预留；已发送传输仍持槽到真实终结 |
+| P2-02 Contest 共享信号量固定 8 | EngineRunnerFactory 用 resolveRuntimeConfig(contestDir, flags).max_inflight_model_calls 建共享信号量；runtime.json=1 与 flags=2 均有行为断言 |
