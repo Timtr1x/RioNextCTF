@@ -1,0 +1,24 @@
+{
+  "started_at": "2026-10-15T09:05:53.869Z",
+  "checks": {
+    "D03": {
+      "ok": true,
+      "detail": "both execs ok (0/0), containers named rionext-kali-acc-d03: 1, 1721ms"
+    },
+    "D03x": {
+      "ok": true,
+      "detail": "exit codes 0,0, containers: 1, 1770ms"
+    },
+    "D05": {
+      "ok": true,
+      "detail": "sibling code=0; in-container sleep after cancel: gone; slow exit code=1; record phase=ended cancel_confirmed=true"
+    },
+    "D04": {
+      "ok": null,
+      "detail": "host.docker.internal does not resolve in this Docker; browser-overlap check skipped (environment, not code)"
+    }
+  },
+  "image": "sha256:8735af706f79721906d27fd1d04699519cbb1e6aa1e46a50d1f44436565a699e",
+  "master_keeper_untouched": true,
+  "finished_at": "2026-10-15T09:06:03.152Z"
+}

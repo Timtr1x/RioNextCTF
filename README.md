@@ -91,13 +91,21 @@ Windows 用 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。�
 
 ## 并行 Execute（多 Worker）
 
-默认每个战役仍是一个 Execute 片段。要并行，给 spec 加：
+默认每个战役仍是一个 Execute 片段（单 Worker）。要并行，两条同时满足才生效：
 
-```json
-"execution_policy": { "max_execute_workers": 2 }
+```bash
+# 请求值（随战役持久化）+ 宿主上限（运行配置）
+rionext run --spec task.json --workers 2 --max-concurrent-execute 2
+RIONEXT_MAX_CONCURRENT_EXECUTE=2 rionext run --spec task.json --workers 2
 ```
 
-并把宿主上限抬高（默认 1）：RuntimeConfig.max_concurrent_execute。调度是"边界复核"：Decide 只在没有 Execute 在跑时规划；最多 N 个片段并行；新输入到达就停止补充新片段，在途片段跑完后复核。每个 Run 有私有工作目录（/workspace/runs/<run-id>）、独立浏览器会话和结果键；工具超时只杀自己的进程。实现与未验收项见 docs/multiworker.md。
+- `--workers N`（1-8）写进 `spec.execution_policy.max_execute_workers`，是这个战役的请求值；`create`/`run` 直接持久化，`start` 对未在跑的战役走控制面更新（记 `execution.policy_changed` 事件），在跑的战役拒绝、先暂停再改。
+- 宿主上限来自统一运行配置：CLI flags > `RIONEXT_MAX_CONCURRENT_EXECUTE` > `<data-dir>/runtime.json`（白名单字段，不存密钥）> 默认 1。模型在途上限同理：`--max-inflight-model-calls` / `RIONEXT_MAX_INFLIGHT_MODEL_CALLS` / runtime.json，默认 8，整个进程共享一个信号量。
+- 请求大于宿主上限不报错，状态页的 `execution_capacity` 显示"请求 2 · 生效 1 · 宿主上限 1"和等待原因；`provider_capacity` 显示本进程模型在途/排队。
+
+调度是"边界复核"：Decide 只在没有 Execute 在跑时规划（存储层互斥）；最多 N 个片段并行；新输入到达就停止补充新片段，在途片段跑完后复核。每个 Run 有私有工作目录（/workspace/runs/<run-id>）、独立浏览器会话和结果键；取消一个 Worker 只终止它自己的进程组（容器内按持久化 pid 标记确认），同伴与共享容器不受影响。控制权有 generation 围栏：失权 Controller 不能领取、续租、发送或写图。实现细节、不变量与验收映射见 docs/multiworker-stabilization.md 与 docs/multiworker-acceptance.md。
+
+回滚：关闭并行把请求值和宿主上限都设回 1 即可，本轮租约与恢复修复继续生效。已升级 v6 的库不要交给旧二进制写（旧二进制拒绝打开）。
 
 ## 验收策略与完成语义
 
@@ -217,7 +225,7 @@ notepad .rionext\contest-token.txt        # 只放一行 token，别有别的字
 
 选题不问模型，照一张写死的排序表来。第一层是不需要连接、不需要附件的静态 web/misc/crypto，第二层是要起容器的 web，第三层是带附件的 misc/crypto，pwn 和 reverse 这些硬骨头垫后。层内按分值从低到高排，同分比解出人数，人多的先打。理由很朴素。开赛抢的是又快又稳的分，让模型自己挑题，它总会被好玩的题勾走。
 
-每道题映射成一个标准 RioNext 战役，id 是 `camp_q_<题目id>`。标题、分类、分值、连接方式、题目描述写进战役的 `brief.txt`，附件由宿主机提前下载好，下载带浏览器 UA，token 不外发。最多 4 个战役并行，`--slots` 可以在 1 到 8 之间调。
+每道题映射成一个标准 RioNext 战役，id 是 `camp_q_<题目id>`。标题、分类、分值、连接方式、题目描述写进战役的 `brief.txt`，附件由宿主机提前下载好，下载带浏览器 UA，token 不外发。最多 4 个战役并行，`--slots` 可以在 1 到 8 之间调；`--workers` 是每道题内部的 Execute 片段数（默认 1），slots × workers 共享本进程模型在途上限，战役总预算不随并行放大。
 
 题型和战役怎么对应：只有靶机的 web 题开纯 web 战役；web 题同时给靶机和源码附件时，开附件战役、靶机地址写进 scope 和题面，agent 先读源码再打靶机；pwn 的 `nc host port` 加附件同理走 `--endpoint`。平台中途换靶机地址时督导会更新战役 scope，web 和 tcp 两个入口都会带上。
 

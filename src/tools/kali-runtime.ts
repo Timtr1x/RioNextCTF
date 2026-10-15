@@ -592,7 +592,9 @@ export class KaliRuntime {
     };
     writeExecRecord(files.json, record);
     const quoted = [bin, ...args].map(shQuote).join(" ");
-    const argv = ["exec", "-w", runRootOf(opts), spec.name, "sh", "-c", `echo $$ > ${shQuote(files.containerPid)}; exec timeout ${capSec} ${quoted}`];
+    // RIONEXT_EXEC marks the whole process group's environment, so cancel can
+    // prove identity from /proc/<pid>/environ even after `exec` swaps the image.
+    const argv = ["exec", "-w", runRootOf(opts), spec.name, "sh", "-c", `echo $$ > ${shQuote(files.containerPid)}; exec env RIONEXT_EXEC=${shQuote(executionId)} timeout ${capSec} ${quoted}`];
     const result = await this.docker.runAsync(argv, {
       timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
@@ -608,7 +610,8 @@ export class KaliRuntime {
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     // The in-container `timeout` wrapper already reaped this invocation's
     // process. Never kill the container here: sibling runs share it (C4).
-    writeExecRecord(files.json, { ...record, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
+    const latest = readExecRecord(files.json) ?? record;
+    writeExecRecord(files.json, { ...latest, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
     const out = { ...result, truncated, container: spec.name };
     this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
@@ -787,6 +790,7 @@ export class KaliRuntime {
       "#!/bin/sh",
       "set +e",
       `echo $$ > ${shQuote(files.containerPid)}`,
+      `export RIONEXT_EXEC=${shQuote(executionId)}`,
       `timeout ${capSec} ${quoted} > ${shQuote(files.containerOut)} 2> ${shQuote(files.containerErr)}`,
       `echo $? > ${shQuote(files.containerExit)}`,
       "",
@@ -913,7 +917,7 @@ export class KaliRuntime {
     };
     writeExecRecord(files.json, record);
     const quoted = [bin, ...args].map(shQuote).join(" ");
-    const argv = ["exec", "-w", runRootOf(opts), spec.name, "sh", "-c", `echo $$ > ${shQuote(files.containerPid)}; exec timeout ${capSec} ${quoted}`];
+    const argv = ["exec", "-w", runRootOf(opts), spec.name, "sh", "-c", `echo $$ > ${shQuote(files.containerPid)}; exec env RIONEXT_EXEC=${shQuote(executionId)} timeout ${capSec} ${quoted}`];
     const result = this.docker.run(argv, {
       timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
@@ -923,7 +927,8 @@ export class KaliRuntime {
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     // The in-container `timeout` wrapper already reaped this invocation's
     // process. Never kill the container here: sibling runs share it (C4).
-    writeExecRecord(files.json, { ...record, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
+    const latestSync = readExecRecord(files.json) ?? record;
+    writeExecRecord(files.json, { ...latestSync, phase: "ended", code: result.code, timed_out: result.timedOut, ended_at: new Date().toISOString() });
     const out = { ...result, truncated, container: spec.name };
     this.last.set(opts.runId ?? opts.campaignId, out);
     return out;
@@ -1007,7 +1012,7 @@ export class KaliRuntime {
       if (record) writeExecRecord(files.json, { ...record, cancel_requested: true, cancel_confirmed: true });
       return "confirmed";
     }
-    const probeCmd = `if [ -f ${shQuote(files.containerPid)} ]; then P=$(cat ${shQuote(files.containerPid)}); if kill -0 "$P" 2>/dev/null && grep -q ${shQuote(executionId)} /proc/$P/cmdline 2>/dev/null; then echo alive; else echo dead; fi; else echo dead; fi`;
+    const probeCmd = `if [ -f ${shQuote(files.containerPid)} ]; then P=$(cat ${shQuote(files.containerPid)}); if kill -0 "$P" 2>/dev/null && cat /proc/$P/environ 2>/dev/null | tr '\\0' '\\n' | grep -q "RIONEXT_EXEC=${executionId}"; then echo alive; else echo dead; fi; else echo dead; fi`;
     const probe = await this.docker.runAsync(["exec", container, "sh", "-c", probeCmd], { timeoutMs: 8_000 });
     if (probe.stdout.trim() !== "alive") {
       if (record) writeExecRecord(files.json, { ...record, cancel_requested: true, cancel_confirmed: true });
@@ -1049,6 +1054,7 @@ export class KaliRuntime {
       "#!/bin/sh",
       "set +e",
       `echo $$ > ${shQuote(files.containerPid)}`,
+      `export RIONEXT_EXEC=${shQuote(executionId)}`,
       `timeout ${capSec} ${quoted} > ${shQuote(files.containerOut)} 2> ${shQuote(files.containerErr)}`,
       `echo $? > ${shQuote(files.containerExit)}`,
       "",
