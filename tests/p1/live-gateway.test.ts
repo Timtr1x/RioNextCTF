@@ -45,7 +45,7 @@ test("Q09 live ModelGateway settle is skipped unless RIONEXT_LIVE_PROVIDER=1", a
   const spec = loadDemoSpec("camp_live_gw");
   e.createCampaign(spec);
   e.storage.setCampaignState(spec.campaign_id, "active", { kind: "user", id: "t" });
-  const run = e.storage.claimDecide(spec.campaign_id, "live")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "live")!;
   const lease: RunLease = {
     run_id: run.run_id,
     campaign_id: spec.campaign_id,
@@ -57,6 +57,7 @@ test("Q09 live ModelGateway settle is skipped unless RIONEXT_LIVE_PROVIDER=1", a
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "live",
+    controller_generation: null,
     continuation_of: null,
   };
   const { stream } = createCataloguedProviderStream({

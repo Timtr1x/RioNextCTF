@@ -43,6 +43,7 @@ function mkLease(runId: string, campaignId: string, fence = 1): RunLease {
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   };
 }
@@ -64,7 +65,7 @@ test("permit rejects a run that is no longer live", async () => {
     fingerprint: "hard-state-fp",
     reopen_rule: { kind: "always" },
   });
-  const claimed = e.storage.claimNextStep("hard-state", "w1", 1)!;
+  const claimed = e.storage.claimNextStepAsOwner("hard-state", "w1", 1)!;
   // simulate the takeover: the run got reclaimed
   e.storage.store.db.prepare("UPDATE task_runs SET state = 'lease_expired' WHERE id = ?").run(claimed.run_id);
   const gate = new DispatchGate(e.storage, e.budget, e.invocations, new FileEffectAdapter(join(e.config.data_dir, "fx")));
@@ -82,7 +83,7 @@ test("permit rejects a run that is no longer live", async () => {
 
 test("a queued model call times out at the lease instead of waking past it", async () => {
   const e = boot("hard-sem");
-  const run = e.storage.claimDecide("hard-sem", "t")!;
+  const run = e.storage.claimDecideAsOwner("hard-sem", "t")!;
   const lease: RunLease = { ...mkLease(run.run_id, "hard-sem", run.fence), deadline_ms: Date.now() + 200 };
   // exhaust the only slot
   const sem = new Semaphore(1);

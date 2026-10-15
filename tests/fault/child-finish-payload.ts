@@ -6,7 +6,7 @@ const data = process.argv[2]!;
 const spec = JSON.parse(readFileSync(process.argv[3]!, "utf8")) as { campaign_id: string };
 const e = new Engine(makeRuntimeConfig(data), { silent: true, maxCycles: 1 });
 e.createCampaign(spec);
-const decide = e.storage.claimDecide(spec.campaign_id, "child")!;
+const decide = e.storage.claimDecideAsOwner(spec.campaign_id, "child")!;
 const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
 e.storage.proposeStepDirect({
   campaign_id: spec.campaign_id,
@@ -49,7 +49,7 @@ const obs = e.storage.recordObservation({
   conditions: {},
   env_rev: "env-1",
 });
-const claimed = e.storage.claimNextStep(spec.campaign_id, "child", e.storage.getCampaign(spec.campaign_id).epoch)!;
+const claimed = e.storage.claimNextStepAsOwner(spec.campaign_id, "child", e.storage.getCampaign(spec.campaign_id).epoch)!;
 const submitted = e.storage.submitRunOutcome({
   campaign_id: spec.campaign_id,
   run_id: claimed.run_id,

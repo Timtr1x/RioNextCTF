@@ -60,7 +60,7 @@ test("controller lock takeover after lease expiry", async () => {
 test("model settle uses reserved tokens so the reserved bucket does not go negative", async () => {
   const dir = tmp();
   const e = boot(dir, "bgt-settle");
-  const run = e.storage.claimDecide("bgt-settle", "t")!;
+  const run = e.storage.claimDecideAsOwner("bgt-settle", "t")!;
   const lease: RunLease = {
     run_id: run.run_id,
     campaign_id: "bgt-settle",
@@ -72,6 +72,7 @@ test("model settle uses reserved tokens so the reserved bucket does not go negat
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   };
   const catalog = new ProviderCatalog(join(dir, "prov"));
@@ -114,8 +115,8 @@ test("tool allowlist and campaign deadline are checked at admit", async () => {
   spec.tool_allowlist = ["finish_step"];
   spec.budget.deadline_ms = null;
   e.storage.store.db.prepare("UPDATE campaigns SET spec_json = ? WHERE id = ?").run(JSON.stringify(spec), "allow-dl");
-  const run = e.storage.claimDecide("allow-dl", "t")!;
-  const claimed = e.storage.claimNextStep("allow-dl", "t", 1);
+  const run = e.storage.claimDecideAsOwner("allow-dl", "t")!;
+  const claimed = e.storage.claimNextStepAsOwner("allow-dl", "t", 1);
   const lease: RunLease = {
     run_id: claimed?.run_id ?? run.run_id,
     campaign_id: "allow-dl",
@@ -127,6 +128,7 @@ test("tool allowlist and campaign deadline are checked at admit", async () => {
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   };
   const gw = e.factory.create("execute", lease.run_id);
@@ -241,7 +243,7 @@ test("catalogued stream sends history, tools, and returns tool calls", async () 
 test("deferred never does not reopen when preconditions are already true", () => {
   const dir = tmp();
   const e = boot(dir, "reopen-never");
-  const run = e.storage.claimDecide("reopen-never", "t")!;
+  const run = e.storage.claimDecideAsOwner("reopen-never", "t")!;
   const root = String(e.storage.list("goals", "reopen-never")[0]!.id);
   const st = e.storage.proposeStepDirect({
     campaign_id: "reopen-never",
@@ -268,7 +270,7 @@ test("deferred never does not reopen when preconditions are already true", () =>
 test("fair pick rotates after a branch has been served", () => {
   const dir = tmp();
   const e = boot(dir, "fair-starve");
-  const run = e.storage.claimDecide("fair-starve", "t")!;
+  const run = e.storage.claimDecideAsOwner("fair-starve", "t")!;
   const root = String(e.storage.list("goals", "fair-starve")[0]!.id);
   const mk = (q: string, branch: string, fp: string, ready: string, served: string | null) => {
     const r = e.storage.proposeStepDirect({
@@ -352,7 +354,7 @@ test("assessment cannot close on stale or missing coverage evidence", () => {
 test("derived facts do not bump progress_epoch", () => {
   const dir = tmp();
   const e = boot(dir, "derived-prog");
-  const run = e.storage.claimDecide("derived-prog", "t")!;
+  const run = e.storage.claimDecideAsOwner("derived-prog", "t")!;
   const before = e.storage.getCampaign("derived-prog").progress_epoch;
   const obs = e.storage.recordObservation({
     campaign_id: "derived-prog",
@@ -435,7 +437,7 @@ test("hints land in the next context pack", () => {
   const dir = tmp();
   const e = boot(dir, "hint-ctx");
   e.hint("hint-ctx", "UNIQUE_HINT_TOKEN_9f3a");
-  const run = e.storage.claimDecide("hint-ctx", "t")!;
+  const run = e.storage.claimDecideAsOwner("hint-ctx", "t")!;
   const pack = buildContextPack(e.storage, {
     run_id: run.run_id,
     campaign_id: "hint-ctx",
@@ -447,6 +449,7 @@ test("hints land in the next context pack", () => {
     cancel_epoch: 0,
     deadline_ms: Date.now() + 1000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   });
   assert.equal(JSON.stringify(pack.user_payload).includes("UNIQUE_HINT_TOKEN_9f3a"), true);
@@ -456,7 +459,7 @@ test("hints land in the next context pack", () => {
 test("httpReq-style propose_plan becomes a ready step", () => {
   const dir = tmp();
   const e = boot(dir, "coerce-http");
-  const run = e.storage.claimDecide("coerce-http", "t")!;
+  const run = e.storage.claimDecideAsOwner("coerce-http", "t")!;
   const result = e.storage.applyProposalBatch({
     campaign_id: "coerce-http",
     producer_id: run.run_id,
@@ -484,7 +487,7 @@ test("success-predicate fact stays pending until a human accepts or rejects it",
   const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 2 });
   e.createCampaign(spec);
   e.storage.setCampaignState("goal-human", "active", { kind: "user", id: "t" });
-  const run = e.storage.claimDecide("goal-human", "t")!;
+  const run = e.storage.claimDecideAsOwner("goal-human", "t")!;
   const obs = e.storage.recordObservation({
     campaign_id: "goal-human",
     producer_id: "p",
@@ -547,6 +550,7 @@ test("success-predicate fact stays pending until a human accepts or rejects it",
     cancel_epoch: 0,
     deadline_ms: Date.now() + 1000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   });
   const blob = JSON.stringify(pack.user_payload);

@@ -10,6 +10,8 @@ export const DURABILITY_NOTES = {
     "WAL + synchronous=NORMAL is durable across process crash on a functioning local volume; it is not a power-loss guarantee on all hardware. Do not copy the main DB file alone as a backup while WAL exists.",
 };
 
+export const LATEST_SCHEMA_VERSION = 6;
+
 export class Store {
   readonly db: DatabaseSync;
   readonly path: string;
@@ -30,14 +32,19 @@ export class Store {
 
   migrate(): void {
     this.db.exec(SCHEMA_SQL);
-    const row = this.db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get() as
-      | { version: number }
-      | undefined;
-    if (!row) {
-      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(4, nowIso());
+    let v = this.schemaVersion();
+    if (v > LATEST_SCHEMA_VERSION) {
+      // A newer binary wrote this database. Writing through the old paths
+      // would skip fences and recovery semantics the data now relies on.
+      throw new Error(`schema_too_new: database is v${v}, this binary understands up to v${LATEST_SCHEMA_VERSION}`);
+    }
+    if (v === 0) {
+      // Fresh database: SCHEMA_SQL already has the full current shape, so the
+      // first open records the latest version — no second-start catch-up.
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(LATEST_SCHEMA_VERSION, nowIso());
       return;
     }
-    if (row.version < 2) {
+    if (v < 2) {
       this.addColumn("controller_locks", "heartbeat_at", "TEXT");
       this.addColumn("controller_locks", "lease_until", "INTEGER");
       this.addColumn("controller_locks", "generation", "INTEGER NOT NULL DEFAULT 1");
@@ -54,23 +61,21 @@ export class Store {
       )`);
       this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(2, nowIso());
     }
-    const latest = this.db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get() as
-      | { version: number }
-      | undefined;
-    if ((latest?.version ?? 0) < 3) {
+    v = this.schemaVersion();
+    if (v < 3) {
       this.migrateToV3();
     }
-    const afterV3 = this.db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get() as
-      | { version: number }
-      | undefined;
-    if ((afterV3?.version ?? 0) < 4) {
+    v = this.schemaVersion();
+    if (v < 4) {
       this.migrateToV4();
     }
-    const afterV4 = this.db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get() as
-      | { version: number }
-      | undefined;
-    if ((afterV4?.version ?? 0) < 5) {
+    v = this.schemaVersion();
+    if (v < 5) {
       this.migrateToV5();
+    }
+    v = this.schemaVersion();
+    if (v < 6) {
+      this.migrateToV6();
     }
   }
 
@@ -95,6 +100,14 @@ export class Store {
   private migrateToV5(): void {
     this.addColumn("task_runs", "last_error", "TEXT");
     this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(5, nowIso());
+  }
+
+  /** Lease fencing and pre-send execution identity (H03/H04). Nullable so
+   *  pre-v6 rows stay valid historical data without a backfill. */
+  private migrateToV6(): void {
+    this.addColumn("task_runs", "controller_generation", "INTEGER");
+    this.addColumn("invocations", "execution_handle", "TEXT");
+    this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(6, nowIso());
   }
 
   private addColumn(table: string, name: string, decl: string): void {

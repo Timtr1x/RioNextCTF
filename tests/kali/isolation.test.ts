@@ -501,7 +501,7 @@ function kaliLease(e: Engine, campaignId: string): RunLease {
     fingerprint: `fp-${campaignId}`,
     reopen_rule: { kind: "never" },
   });
-  const claimed = e.storage.claimNextStep(campaignId, "owner-a", 1);
+  const claimed = e.storage.claimNextStepAsOwner(campaignId, "owner-a", 1);
   if (!claimed) throw new Error("no execute slot");
   return {
     run_id: claimed.run_id,
@@ -514,6 +514,7 @@ function kaliLease(e: Engine, campaignId: string): RunLease {
     cancel_epoch: e.storage.getCampaign(campaignId).cancel_epoch,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "owner-a",
+    controller_generation: null,
     continuation_of: null,
   };
 }

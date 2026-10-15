@@ -124,7 +124,7 @@ test("R07-01: a plan-creating Decide leaves requested_seq <= reviewed_seq", () =
   const spec = loadDemoSpec("sched-r07");
   e.createCampaign(spec);
   e.storage.setCampaignState("sched-r07", "active", { kind: "user", id: "t" });
-  const run = e.storage.claimDecide("sched-r07", "t")!;
+  const run = e.storage.claimDecideAsOwner("sched-r07", "t")!;
   const pack = buildContextPack(e.storage, {
     run_id: run.run_id,
     campaign_id: "sched-r07",
@@ -136,6 +136,7 @@ test("R07-01: a plan-creating Decide leaves requested_seq <= reviewed_seq", () =
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   });
   const H = pack.manifest.graph_snapshot_seq;
@@ -162,7 +163,7 @@ test("R07-03: a mid-run hint stays unreviewed; the plan's own writes don't swall
   const spec = loadDemoSpec("sched-r07b");
   e.createCampaign(spec);
   e.storage.setCampaignState("sched-r07b", "active", { kind: "user", id: "t" });
-  const run = e.storage.claimDecide("sched-r07b", "t")!;
+  const run = e.storage.claimDecideAsOwner("sched-r07b", "t")!;
   const pack = buildContextPack(e.storage, {
     run_id: run.run_id,
     campaign_id: "sched-r07b",
@@ -174,6 +175,7 @@ test("R07-03: a mid-run hint stays unreviewed; the plan's own writes don't swall
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   });
   const H = pack.manifest.graph_snapshot_seq;

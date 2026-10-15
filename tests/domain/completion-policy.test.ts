@@ -97,7 +97,7 @@ test("V19: a coverage_result without evidence is rejected and marks nothing", as
   const spec = loadAssessmentSpec("v19");
   e.createCampaign(spec);
   const covId = String(e.storage.list("coverage_items", "v19").find((c) => c.obligation === "inspect-desk")!.id);
-  const decide = e.storage.claimDecide("v19", "t")!;
+  const decide = e.storage.claimDecideAsOwner("v19", "t")!;
   const root = String(e.storage.list("goals", "v19")[0]!.id);
   e.storage.proposeStepDirect({
     campaign_id: "v19",
@@ -128,7 +128,7 @@ test("V19: a coverage_result without evidence is rejected and marks nothing", as
     finish_requested: true,
     protocol_error: null,
   });
-  const claimed = e.storage.claimNextStep("v19", "t", 1)!;
+  const claimed = e.storage.claimNextStepAsOwner("v19", "t", 1)!;
   const res = e.storage.submitRunOutcome({
     campaign_id: "v19",
     run_id: claimed.run_id,
@@ -182,7 +182,7 @@ test("R02-01/02: assessment matching facts are ordinary facts, derived stays inf
   spec.verification_policy = { ...spec.verification_policy, require_independent_verify: true };
   e.createCampaign(spec);
   e.storage.setCampaignState("r02", "active", { kind: "user", id: "t" });
-  const run = e.storage.claimDecide("r02", "t")!;
+  const run = e.storage.claimDecideAsOwner("r02", "t")!;
   const obs = e.storage.recordObservation({
     campaign_id: "r02",
     producer_id: "t",
@@ -233,7 +233,7 @@ test("R02-03: a strict goal_seeking flag claim still parks", () => {
   spec.root_goal = { ...spec.root_goal, success_predicate_ref: "flag_recovered" };
   e.createCampaign(spec);
   e.storage.setCampaignState("r02c", "active", { kind: "user", id: "t" });
-  const run = e.storage.claimDecide("r02c", "t")!;
+  const run = e.storage.claimDecideAsOwner("r02c", "t")!;
   const obs = e.storage.recordObservation({
     campaign_id: "r02c",
     producer_id: "t",

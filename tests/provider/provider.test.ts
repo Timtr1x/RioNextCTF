@@ -371,7 +371,7 @@ test("P1 pause resume hint revise-budget explain-step", () => {
   assert.ok(epoch >= 1);
   const b = e.reviseBudget(spec.campaign_id, { max_calls: 12 });
   assert.ok(b >= 1);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const step = e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
     producer_id: "p",

@@ -32,6 +32,7 @@ function lease(campaignId: string, mode: "decide" | "execute", stepId: string | 
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "test",
+    controller_generation: null,
     continuation_of: null,
   };
 }

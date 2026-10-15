@@ -103,7 +103,7 @@ test("T02 same fingerprint rewrite does not reset attempt_count", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t02");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   const a = e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
@@ -146,7 +146,7 @@ test("T03 blocked then ready after missing precondition fact", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t03");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   const blocked = e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
@@ -195,7 +195,7 @@ test("T04 deferred reopen after env revision change", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t04");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   const st = e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
@@ -258,7 +258,7 @@ test("T06 submit_fact without evidence never verified", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t06");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const r = e.storage.submitFact({
     campaign_id: spec.campaign_id,
     producer_id: "p",
@@ -293,7 +293,7 @@ test("T11 opposite observations leave disputed facts", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t11");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const o1 = e.storage.recordObservation({
     campaign_id: spec.campaign_id, producer_id: "p", submission_id: "o1", run_id: run.run_id, attempt_id: run.run_id,
     subject: "x", body: { v: 1 }, artifact_refs: [], conditions: {}, env_rev: "e",
@@ -320,7 +320,7 @@ test("T12 unknown AND/OR does not admit ready", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t12");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   const r = e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
@@ -345,7 +345,7 @@ test("T13 mutual blocked steps do not spawn isomorphic extras", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t13");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id, producer_id: "p", submission_id: "a", run_id: run.run_id,
@@ -397,7 +397,7 @@ test("T15 retire subgoal keeps history", () => {
   const e = engine(dir());
   const spec = loadDemoSpec("t15");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   e.storage.applyProposalBatch({
     campaign_id: spec.campaign_id,
@@ -461,6 +461,7 @@ test("T16 new run rebuilds from structured state not Pi history", async () => {
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t16",
+    controller_generation: null,
     continuation_of: firstOutcome.run_id,
   };
   const pack = buildContextPack(e.storage, previewLease);
@@ -609,7 +610,7 @@ test("T24 confirmed finding does not complete assessment with untested coverage"
   const e = engine(dir());
   const spec = loadAssessmentSpec("t24");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const o = e.storage.recordObservation({
     campaign_id: spec.campaign_id, producer_id: "p", submission_id: "o", run_id: run.run_id, attempt_id: run.run_id,
     subject: "note", body: { clue: "0000" }, artifact_refs: [], conditions: {}, env_rev: "e",
@@ -689,7 +690,7 @@ function obsIdFrom(ctx: { messages: unknown[] }): string | undefined {
 }
 
 function seedReadyStep(e: Engine, campaignId: string, question: string, fingerprint: string): void {
-  const decide = e.storage.claimDecide(campaignId, "seed")!;
+  const decide = e.storage.claimDecideAsOwner(campaignId, "seed")!;
   const root = String(e.storage.list("goals", campaignId)[0]!.id);
   e.storage.proposeStepDirect({
     campaign_id: campaignId,
@@ -1038,7 +1039,7 @@ test("F12 forged and cross-campaign evidence are rejected", async () => {
   const other = loadDemoSpec("f12b");
   e.createCampaign(spec);
   e.createCampaign(other);
-  const otherDecide = e.storage.claimDecide(other.campaign_id, "t")!;
+  const otherDecide = e.storage.claimDecideAsOwner(other.campaign_id, "t")!;
   const foreign = e.storage.recordObservation({
     campaign_id: other.campaign_id,
     producer_id: "t",
@@ -1283,6 +1284,7 @@ test("F27 incomplete keeps observations for a later Decide pack", async () => {
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "f27",
+    controller_generation: null,
     continuation_of: outcome.run_id,
   });
   assert.ok(JSON.stringify(pack.user_payload).includes(obsId));
@@ -1401,7 +1403,7 @@ test("F30 blocked reopen_rule=fact_key waits for the fact", async () => {
   assert.equal(first.reason, "blocked");
   e.storage.recomputeStepReadiness(spec.campaign_id);
   assert.equal(await e.runExecuteSlot(spec.campaign_id), null);
-  const decide = e.storage.claimDecide(spec.campaign_id, "fact")!;
+  const decide = e.storage.claimDecideAsOwner(spec.campaign_id, "fact")!;
   const obs = e.storage.recordObservation({
     campaign_id: spec.campaign_id,
     producer_id: "fact",
@@ -1450,10 +1452,10 @@ test("F31 expired run A cannot finishRun over run B", async () => {
   const spec = loadDemoSpec("f31");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f31 step", "f31-fp");
-  const a = e.storage.claimNextStep(spec.campaign_id, "owner-a", 1)!;
+  const a = e.storage.claimNextStepAsOwner(spec.campaign_id, "owner-a", 1)!;
   e.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = 0 WHERE id = ?").run(a.run_id);
   e.storage.recoverStaleRuns(spec.campaign_id);
-  const b = e.storage.claimNextStep(spec.campaign_id, "owner-b", 1)!;
+  const b = e.storage.claimNextStepAsOwner(spec.campaign_id, "owner-b", 1)!;
   assert.ok(b);
   assert.notEqual(b.run_id, a.run_id);
   const late = e.storage.finishRun(spec.campaign_id, a.run_id, {

@@ -69,7 +69,7 @@ function claimVerifyRun(
     operations: [{ op: "request_verification", finding_or_fact_id: targetId, method }],
   });
   e.storage.finishRun(campaignId, decideRunId, decideOutcome(decideRunId));
-  const run = e.storage.claimNextStep(campaignId, "t", 1)!;
+  const run = e.storage.claimNextStepAsOwner(campaignId, "t", 1)!;
   assert.equal(run.kind, "verify");
   return run;
 }
@@ -120,7 +120,7 @@ function findingStatus(e: Engine, campaignId: string, id: string): string {
 test("V01/V02: goal claim parks only under the independent-verify policy", () => {
   // strict policy: observed goal fact stays proposed and pending
   const strict = boot("v01");
-  const r1 = strict.storage.claimDecide("v01", "t")!;
+  const r1 = strict.storage.claimDecideAsOwner("v01", "t")!;
   strict.storage.submitFact({
     campaign_id: "v01",
     producer_id: "t",
@@ -140,7 +140,7 @@ test("V01/V02: goal claim parks only under the independent-verify policy", () =>
   const open = boot("v02", (spec) => {
     spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
   });
-  const r2 = open.storage.claimDecide("v02", "t")!;
+  const r2 = open.storage.claimDecideAsOwner("v02", "t")!;
   open.storage.submitFact({
     campaign_id: "v02",
     producer_id: "t",
@@ -163,7 +163,7 @@ test("V03/V04: derived, stale and disputed facts never satisfy the goal", () => 
   const e = boot("v03", (spec) => {
     spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
   });
-  const run = e.storage.claimDecide("v03", "t")!;
+  const run = e.storage.claimDecideAsOwner("v03", "t")!;
   e.storage.submitFact({
     campaign_id: "v03",
     producer_id: "t",
@@ -192,7 +192,7 @@ test("V03/V04: derived, stale and disputed facts never satisfy the goal", () => 
 
 test("V08: a verify run that resolves without a verdict confirms nothing", () => {
   const e = boot("v08");
-  const decide = e.storage.claimDecide("v08", "t")!;
+  const decide = e.storage.claimDecideAsOwner("v08", "t")!;
   const findingId = seedFinding(e, "v08", decide.run_id, "misleading code path", "v08-a");
   const run = claimVerifyRun(e, "v08", findingId, decide.run_id);
   const fresh = seedEvidence(e, "v08", run.run_id);
@@ -203,7 +203,7 @@ test("V08: a verify run that resolves without a verdict confirms nothing", () =>
 
 test("V09/V14: a verdict applies to its named target only, with fresh in-run evidence", () => {
   const e = boot("v09");
-  const decide = e.storage.claimDecide("v09", "t")!;
+  const decide = e.storage.claimDecideAsOwner("v09", "t")!;
   const a = seedFinding(e, "v09", decide.run_id, "backup leak", "v09-a");
   const b = seedFinding(e, "v09", decide.run_id, "weak crypto", "v09-b");
   const c = seedFinding(e, "v09", decide.run_id, "open debug", "v09-c");
@@ -228,9 +228,9 @@ test("V10: a verdict naming another campaign's entity is rejected, not applied",
   const e = boot("v10");
   const other = boot("v10b");
   try {
-    const decide = e.storage.claimDecide("v10", "t")!;
+    const decide = e.storage.claimDecideAsOwner("v10", "t")!;
     const mine = seedFinding(e, "v10", decide.run_id, "mine", "v10-a");
-    const otherDecide = other.storage.claimDecide("v10b", "t")!;
+    const otherDecide = other.storage.claimDecideAsOwner("v10b", "t")!;
     const foreign = seedFinding(other, "v10b", otherDecide.run_id, "foreign", "v10-b");
     // craft a verify step whose declared target is `mine`, then lie about it
     const run = claimVerifyRun(e, "v10", mine, decide.run_id);
@@ -253,7 +253,7 @@ test("V10: a verdict naming another campaign's entity is rejected, not applied",
 
 test("V11/V12: confirm needs fresh-env evidence produced by the verify run itself", () => {
   const e = boot("v11");
-  const decide = e.storage.claimDecide("v11", "t")!;
+  const decide = e.storage.claimDecideAsOwner("v11", "t")!;
   const findingId = seedFinding(e, "v11", decide.run_id, "stale target", "v11-a");
   const run = claimVerifyRun(e, "v11", findingId, decide.run_id);
 
@@ -270,7 +270,7 @@ test("V11/V12: confirm needs fresh-env evidence produced by the verify run itsel
 
 test("V12: re-citing the original claim's evidence is not independent reproduction", () => {
   const e = boot("v12");
-  const decide = e.storage.claimDecide("v12", "t")!;
+  const decide = e.storage.claimDecideAsOwner("v12", "t")!;
   const origEvidence = seedEvidence(e, "v12", decide.run_id);
   const f = e.storage.submitFinding({
     campaign_id: "v12",
@@ -299,7 +299,7 @@ test("V12: re-citing the original claim's evidence is not independent reproducti
 
 test("V13: Finalize never mints a first-time verdict", () => {
   const e = boot("v13");
-  const decide = e.storage.claimDecide("v13", "t")!;
+  const decide = e.storage.claimDecideAsOwner("v13", "t")!;
   const findingId = seedFinding(e, "v13", decide.run_id, "finalize bait", "v13-a");
   const run = claimVerifyRun(e, "v13", findingId, decide.run_id);
   const fresh = seedEvidence(e, "v13", run.run_id);
@@ -323,7 +323,7 @@ test("V13: Finalize never mints a first-time verdict", () => {
 
 test("V15: the same verdict re-applied is idempotent", () => {
   const e = boot("v15");
-  const decide = e.storage.claimDecide("v15", "t")!;
+  const decide = e.storage.claimDecideAsOwner("v15", "t")!;
   const findingId = seedFinding(e, "v15", decide.run_id, "dup", "v15-a");
   const run = claimVerifyRun(e, "v15", findingId, decide.run_id);
   const fresh = seedEvidence(e, "v15", run.run_id);
@@ -364,7 +364,7 @@ test("R01-01/02: fact verdicts apply through the fact path and settle the run", 
   const e = boot("r01a", (spec) => {
     spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
   });
-  const decide = e.storage.claimDecide("r01a", "t")!;
+  const decide = e.storage.claimDecideAsOwner("r01a", "t")!;
   const factId = seedGoalFact(e, "r01a", decide.run_id, "backup_readable", "backup endpoint is readable");
   const run = claimVerifyRun(e, "r01a", factId, decide.run_id);
   const fresh = seedEvidence(e, "r01a", run.run_id);
@@ -386,7 +386,7 @@ test("R01-01/02: fact verdicts apply through the fact path and settle the run", 
   const e2 = boot("r01b", (spec) => {
     spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
   });
-  const d2 = e2.storage.claimDecide("r01b", "t")!;
+  const d2 = e2.storage.claimDecideAsOwner("r01b", "t")!;
   const factId2 = seedGoalFact(e2, "r01b", d2.run_id, "xss_present", "xss exists");
   const r2 = claimVerifyRun(e2, "r01b", factId2, d2.run_id);
   const fresh2 = seedEvidence(e2, "r01b", r2.run_id);
@@ -406,7 +406,7 @@ test("R01-04: a verdict against a stale target revision is rejected, the run sti
   const e = boot("r01c", (spec) => {
     spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
   });
-  const decide = e.storage.claimDecide("r01c", "t")!;
+  const decide = e.storage.claimDecideAsOwner("r01c", "t")!;
   const factId = seedGoalFact(e, "r01c", decide.run_id, "key_x", "claim v1");
   const run = claimVerifyRun(e, "r01c", factId, decide.run_id);
   // target moved on between request and finish
@@ -431,7 +431,7 @@ test("R01-05: a missing target is rejected with an event and the slot frees", ()
   const e = boot("r01d", (spec) => {
     spec.verification_policy = { require_independent_verify: false, oracle_id: "none" };
   });
-  const decide = e.storage.claimDecide("r01d", "t")!;
+  const decide = e.storage.claimDecideAsOwner("r01d", "t")!;
   const factId = seedGoalFact(e, "r01d", decide.run_id, "key_y", "claim");
   const run = claimVerifyRun(e, "r01d", factId, decide.run_id);
   const fresh = seedEvidence(e, "r01d", run.run_id);
@@ -449,7 +449,7 @@ test("R01-05: a missing target is rejected with an event and the slot frees", ()
 
 test("R01-08: a model verdict never substitutes for external flag acceptance", () => {
   const e = boot("r01e"); // strict policy: require_independent_verify = true
-  const decide = e.storage.claimDecide("r01e", "t")!;
+  const decide = e.storage.claimDecideAsOwner("r01e", "t")!;
   const flagFact = seedGoalFact(e, "r01e", decide.run_id, "flag_recovered", "flag{maybe}");
   const run = claimVerifyRun(e, "r01e", flagFact, decide.run_id);
   const fresh = seedEvidence(e, "r01e", run.run_id);
@@ -471,7 +471,7 @@ test("R01-08: a model verdict never substitutes for external flag acceptance", (
 
 test("F01: a refuted verdict on a confirmed finding is rejected, the run still settles", () => {
   const e = boot("f01");
-  const decide = e.storage.claimDecide("f01", "t")!;
+  const decide = e.storage.claimDecideAsOwner("f01", "t")!;
   const findingId = seedFinding(e, "f01", decide.run_id, "already confirmed", "f01-a");
   // legally confirm it first
   const v1 = claimVerifyRun(e, "f01", findingId, decide.run_id);
@@ -485,7 +485,7 @@ test("F01: a refuted verdict on a confirmed finding is rejected, the run still s
   assert.equal(findingStatus(e, "f01", findingId), "confirmed");
 
   // now a refuted verdict arrives; confirmed → refuted is not a legal transition
-  const decide2 = e.storage.claimDecide("f01", "t")!;
+  const decide2 = e.storage.claimDecideAsOwner("f01", "t")!;
   const v2 = claimVerifyRun(e, "f01", findingId, decide2.run_id, "re-verify");
   const fresh2 = seedEvidence(e, "f01", v2.run_id);
   finishVerify(e, "f01", v2, {
@@ -503,7 +503,7 @@ test("F01: a refuted verdict on a confirmed finding is rejected, the run still s
 
 test("F02: a confirmed finding persists its verification evidence refs", () => {
   const e = boot("f02");
-  const decide = e.storage.claimDecide("f02", "t")!;
+  const decide = e.storage.claimDecideAsOwner("f02", "t")!;
   const findingId = seedFinding(e, "f02", decide.run_id, "claim", "f02-a");
   const run = claimVerifyRun(e, "f02", findingId, decide.run_id);
   const fresh = seedEvidence(e, "f02", run.run_id);

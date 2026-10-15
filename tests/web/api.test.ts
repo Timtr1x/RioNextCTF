@@ -291,7 +291,7 @@ test("rionext ui api end to end", async (t) => {
     await api("/api/campaigns", { body: { spec } });
     const e = ui.host.control;
     e.storage.setCampaignState("camp_api_goal", "active", { kind: "user", id: "t" });
-    const run = e.storage.claimDecide("camp_api_goal", "t")!;
+    const run = e.storage.claimDecideAsOwner("camp_api_goal", "t")!;
     const obs = e.storage.recordObservation({
       campaign_id: "camp_api_goal",
       producer_id: "p",

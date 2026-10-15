@@ -52,7 +52,7 @@ async function rig(id: string): Promise<Rig> {
   const spec = loadAssessmentSpec(id);
   e.createCampaign(spec);
   e.storage.setCampaignState(id, "active", { kind: "user", id: "t" });
-  const decide = e.storage.claimDecide(id, "t")!;
+  const decide = e.storage.claimDecideAsOwner(id, "t")!;
   const root = String(e.storage.list("goals", id)[0]!.id);
   const covId = String(e.storage.list("coverage_items", id).find((c) => c.obligation === "inspect-desk")!.id);
   e.storage.proposeStepDirect({
@@ -72,7 +72,7 @@ async function rig(id: string): Promise<Rig> {
     input_refs: [{ id: covId, revision: e.storage.entityRevisionFor(id, covId)! }],
   });
   e.storage.finishRun(id, decide.run_id, outcome(decide.run_id));
-  const claimed = e.storage.claimNextStep(id, "t", 1)!;
+  const claimed = e.storage.claimNextStepAsOwner(id, "t", 1)!;
   return { e, covId, runId: claimed.run_id, fence: claimed.fence };
 }
 

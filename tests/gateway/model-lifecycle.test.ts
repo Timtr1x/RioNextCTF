@@ -38,6 +38,7 @@ function leaseFor(run: { run_id: string; fence: number }, campaignId: string): R
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   };
 }
@@ -72,7 +73,7 @@ function ctx(): { systemPrompt: string; messages: { role: "user"; content: strin
 test("S10: a provider that throws before producing a stream frees the slot and settles exactly once", async () => {
   for (const mode of ["sync", "async"] as const) {
     const e = boot(`s10-${mode}`);
-    const run = e.storage.claimDecide(`s10-${mode}`, "t")!;
+    const run = e.storage.claimDecideAsOwner(`s10-${mode}`, "t")!;
     const sem = new Semaphore(1);
     let calls = 0;
     const inner = () => {
@@ -99,7 +100,7 @@ test("S10: a provider that throws before producing a stream frees the slot and s
 
 test("S11: a stream whose result rejects still frees the slot with no unhandled rejection", async () => {
   const e = boot("s11");
-  const run = e.storage.claimDecide("s11", "t")!;
+  const run = e.storage.claimDecideAsOwner("s11", "t")!;
   const sem = new Semaphore(1);
   const inner = () => ({ result: () => Promise.reject(new Error("transport exploded")) }) as unknown as AssistantMessageEventStream;
   const gw = new ModelGateway(e.storage, e.budget, new InvocationBook(e.storage), inner as never, leaseFor(run, "s11"), "m", "p", 16, { semaphore: sem });
@@ -116,7 +117,7 @@ test("S11: a stream whose result rejects still frees the slot with no unhandled 
 
 test("S12: the gateway observes termination even if nobody calls result()", async () => {
   const e = boot("s12");
-  const run = e.storage.claimDecide("s12", "t")!;
+  const run = e.storage.claimDecideAsOwner("s12", "t")!;
   const sem = new Semaphore(1);
   const ctl = controllableStream();
   const inner = () => ctl.stream;
@@ -135,7 +136,7 @@ test("S12: the gateway observes termination even if nobody calls result()", asyn
 
 test("S13: multiple consumers of result() settle the budget exactly once", async () => {
   const e = boot("s13");
-  const run = e.storage.claimDecide("s13", "t")!;
+  const run = e.storage.claimDecideAsOwner("s13", "t")!;
   const sem = new Semaphore(1);
   const inner = () => {
     const c = controllableStream();
@@ -157,7 +158,7 @@ test("S13: multiple consumers of result() settle the budget exactly once", async
 
 test("S14: a campaign cancelled while the call queues never reaches the provider", async () => {
   const e = boot("s14");
-  const run = e.storage.claimDecide("s14", "t")!;
+  const run = e.storage.claimDecideAsOwner("s14", "t")!;
   const sem = new Semaphore(1);
   const blocker = await sem.acquire();
   let innerCalls = 0;
@@ -188,7 +189,7 @@ test("S14: a campaign cancelled while the call queues never reaches the provider
 
 test("S15: an unfinished stream keeps its slot — no early release on abandonment", async () => {
   const e = boot("s15");
-  const run = e.storage.claimDecide("s15", "t")!;
+  const run = e.storage.claimDecideAsOwner("s15", "t")!;
   const sem = new Semaphore(1);
   const ctl = controllableStream();
   const inner = () => ctl.stream;

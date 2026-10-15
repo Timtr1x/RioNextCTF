@@ -34,7 +34,7 @@ function boot(dir: string, id: string): Engine {
 }
 
 function leaseFor(e: Engine, campaignId: string): RunLease {
-  const run = e.storage.claimDecide(campaignId, "owner-a")!;
+  const run = e.storage.claimDecideAsOwner(campaignId, "owner-a")!;
   const root = String(e.storage.list("goals", campaignId)[0]!.id);
   e.storage.proposeStepDirect({
     campaign_id: campaignId,
@@ -51,7 +51,21 @@ function leaseFor(e: Engine, campaignId: string): RunLease {
     fingerprint: `fp-${Math.random()}`,
     reopen_rule: { kind: "never" },
   });
-  const claimed = e.storage.claimNextStep(campaignId, "owner-a", 1)!;
+  e.storage.finishRun(campaignId, run.run_id, {
+    run_id: run.run_id,
+    step_id: null,
+    mode: "decide",
+    reason: "resolved",
+    summary: "seed",
+    observation_ids: [],
+    fact_ids: [],
+    finding_ids: [],
+    blocked_on: null,
+    reopen_rule: null,
+    finish_requested: true,
+    protocol_error: null,
+  });
+  const claimed = e.storage.claimNextStepAsOwner(campaignId, "owner-a", 1)!;
   return {
     run_id: claimed.run_id,
     campaign_id: campaignId,
@@ -63,6 +77,7 @@ function leaseFor(e: Engine, campaignId: string): RunLease {
     cancel_epoch: e.storage.getCampaign(campaignId).cancel_epoch,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "owner-a",
+    controller_generation: null,
     continuation_of: null,
   };
 }
@@ -331,9 +346,9 @@ test("T28 unique step claim across two connections", () => {
   // and the earlier attempt's live run still occupies a slot until it settles
   e1.storage.store.db.prepare("UPDATE steps SET status = 'ready', active_run_id = NULL WHERE campaign_id = ?").run(campId);
   e1.storage.store.db.prepare("UPDATE task_runs SET state = 'finished' WHERE campaign_id = ? AND mode = 'execute'").run(campId);
-  const a = e1.storage.claimNextStep(campId, "w1", 10);
+  const a = e1.storage.claimNextStepAsOwner(campId, "w1", 10);
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
-  const b = e2.storage.claimNextStep(campId, "w2", 10);
+  const b = e2.storage.claimNextStepAsOwner(campId, "w2", 10);
   const wins = [a, b].filter(Boolean);
   assert.equal(wins.length, 1);
   e1.close();
@@ -387,7 +402,7 @@ test("T39 stale fact re-checks ready steps", () => {
   const dir = tmp();
   const e = boot(dir, "t39");
   const campId = "t39";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const obs = e.storage.recordObservation({
     campaign_id: campId,
     producer_id: "p",
@@ -438,7 +453,7 @@ test("T45 closing CAS fails when new observation arrives", () => {
   const dir = tmp();
   const e = boot(dir, "t45");
   const campId = "t45";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const { H } = enterClosing(e, campId);
   const late = e.storage.recordObservation({
     campaign_id: campId,
@@ -490,7 +505,7 @@ test("T53 duplicate findings with different titles share dedup_key", () => {
   const dir = tmp();
   const e = boot(dir, "t53");
   const campId = "t53";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const o = e.storage.recordObservation({
     campaign_id: campId,
     producer_id: "p",
@@ -530,7 +545,7 @@ test("T54 verify missing conditions is inconclusive not refuted", () => {
   const dir = tmp();
   const e = boot(dir, "t54");
   const campId = "t54";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const o = e.storage.recordObservation({
     campaign_id: campId,
     producer_id: "p",
@@ -562,7 +577,7 @@ test("T40 old env evidence does not confirm under new env", () => {
   const dir = tmp();
   const e = boot(dir, "t40");
   const campId = "t40";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const o = e.storage.recordObservation({
     campaign_id: campId,
     producer_id: "p",
@@ -617,8 +632,8 @@ test("T42 many events still one Decide lock", () => {
   const e = boot(dir, "t42");
   const campId = "t42";
   for (let i = 0; i < 100; i++) e.storage.markRequested(campId, i + 1);
-  const a = e.storage.claimDecide(campId, "d1");
-  const b = e.storage.claimDecide(campId, "d2");
+  const a = e.storage.claimDecideAsOwner(campId, "d1");
+  const b = e.storage.claimDecideAsOwner(campId, "d2");
   assert.ok(a);
   assert.equal(b, null);
   e.close();
@@ -628,7 +643,7 @@ test("T44 fair pick serves the longest-waiting branch", () => {
   const dir = tmp();
   const e = boot(dir, "t44");
   const campId = "t44";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const root = String(e.storage.list("goals", campId)[0]!.id);
   const mk = (q: string, branch: string, fp: string, ready: string) => {
     const r = e.storage.proposeStepDirect({
@@ -667,7 +682,7 @@ test("T52 new coverage item records a larger denominator", () => {
     campaign_id: campId,
     producer_id: "p",
     submission_id: "cov",
-    run_id: e.storage.claimDecide(campId, "t")!.run_id,
+    run_id: e.storage.claimDecideAsOwner(campId, "t")!.run_id,
     operations: [{ op: "propose_coverage_item", obligation: "new-asset", dimensions: { asset: "x" }, mandatory: true }],
   });
   const after = e.storage.list("coverage_items", campId).length;
@@ -721,7 +736,7 @@ test("T37 artifact on disk, DB commit fails, orphan recoverable, no confirmed Fa
   const halfDir = join(e.storage.artifacts.campaignDir(campId), "aa");
   mkdirSync(halfDir, { recursive: true });
   writeFileSync(join(halfDir, ".tmp-half"), "half-written");
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const rejected = e.storage.submitFact({
     campaign_id: campId,
     producer_id: "p",
@@ -751,7 +766,7 @@ test("T43 irrelevant events during Decide do not starve a valid read-set commit"
   const dir = tmp();
   const e = boot(dir, "t43");
   const campId = "t43";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const root = e.storage.list("goals", campId)[0]!;
   const first = e.storage.proposeStepDirect({
     campaign_id: campId,
@@ -847,7 +862,7 @@ test("T51 backup with WAL and new artifacts restores a consistent snapshot", asy
   const dir = tmp();
   const e = boot(dir, "t51");
   const campId = "t51";
-  const run = e.storage.claimDecide(campId, "t")!;
+  const run = e.storage.claimDecideAsOwner(campId, "t")!;
   const art = await e.storage.putArtifact(campId, "evidence-body-t51", "text/plain", run.run_id);
   const obs = e.storage.recordObservation({
     campaign_id: campId,

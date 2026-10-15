@@ -37,6 +37,7 @@ function leaseFor(run: { run_id: string; fence: number }, campaignId: string): R
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   };
 }
@@ -63,7 +64,7 @@ function fakeProvider(dir: string): ReturnType<typeof createCataloguedProviderSt
 
 test("a gated model call still settles budget and marks the invocation", async () => {
   const e = boot("bgt-gated");
-  const run = e.storage.claimDecide("bgt-gated", "t")!;
+  const run = e.storage.claimDecideAsOwner("bgt-gated", "t")!;
   const lease = leaseFor(run, "bgt-gated");
   const { stream } = fakeProvider(e.config.data_dir);
   const sem = new Semaphore(2);
@@ -99,7 +100,7 @@ test("recover skips an in-flight tool dispatch on a live run, reconciles it when
     fingerprint: "rec-live-fp",
     reopen_rule: { kind: "always" },
   });
-  const claimed = e.storage.claimNextStep("rec-live", "w1", 1)!;
+  const claimed = e.storage.claimNextStepAsOwner("rec-live", "w1", 1)!;
   const lease = leaseFor(claimed, "rec-live");
   // an in-flight tool dispatch (permit taken, never sent)
   const inv = e.invocations.prepare({
@@ -135,7 +136,7 @@ test("recover skips an in-flight tool dispatch on a live run, reconciles it when
 
 test("an orphaned model invocation of a settled run reconciles its budget", async () => {
   const e = boot("rec-model");
-  const run = e.storage.claimDecide("rec-model", "t")!;
+  const run = e.storage.claimDecideAsOwner("rec-model", "t")!;
   const lease = leaseFor(run, "rec-model");
   const inv = e.invocations.prepare({
     campaign_id: "rec-model",

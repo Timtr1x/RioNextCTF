@@ -6,7 +6,7 @@ import { configFingerprint, makeRuntimeConfig, printStartupBanner, validateStart
 import { buildContextPack } from "../context/builder.ts";
 import { evaluateCompletion, completeCoverageRequired, confirmedFindingsRequired, goalFactCanSatisfy, requiresIndependentGoalVerification, type CompletionSnapshot, type CoverageRow } from "../domain/completion.ts";
 import { DomainError } from "../domain/errors.ts";
-import type { CampaignSpec, CampaignState, RunLease, TaskOutcome } from "../domain/types.ts";
+import type { CampaignSpec, CampaignState, ControllerLease, RunLease, TaskOutcome } from "../domain/types.ts";
 import { decideChooser, executeChooser } from "../eval/demo-policy.ts";
 import { Semaphore } from "../gateway/semaphore.ts";
 import { commitCompletion, enterClosing } from "./close.ts";
@@ -62,6 +62,8 @@ export class Engine {
   lastWorker: PiWorker | null = null;
   /** Live workers this process drives, by run id. Cancel/close abort them all. */
   private readonly activeWorkers = new Map<string, PiWorker>();
+  /** Controller leases this engine currently holds, by campaign id. */
+  private readonly controllerLeases = new Map<string, ControllerLease>();
   /** Shared provider concurrency cap across all runs (and contest siblings). */
   private readonly modelSem: Semaphore;
   modelSends = 0;
@@ -162,10 +164,11 @@ export class Engine {
     // is driving the campaign. A crashed supervisor therefore frees its
     // campaigns within ~run_lease_ms instead of holding them for an hour.
     const controllerLease = this.config.run_lease_ms;
-    this.storage.acquireControllerLock(campaignId, this.config.instance_id, controllerLease);
+    const ctrl = this.controllerLease(campaignId, controllerLease);
     const lockHeartbeat = setInterval(() => {
       try {
-        this.storage.heartbeatControllerLock(campaignId, this.config.instance_id, controllerLease);
+        const ok = this.storage.heartbeatControllerLock(campaignId, ctrl.owner, ctrl.generation, controllerLease);
+        if (!ok) this.loseController(campaignId, "heartbeat_rejected");
       } catch {
         // DB closing; the run path surfaces real errors.
       }
@@ -175,7 +178,47 @@ export class Engine {
       await this.startLocked(campaignId);
     } finally {
       clearInterval(lockHeartbeat);
+      this.releaseControllerLease(campaignId);
     }
+  }
+
+  /** This engine's controller lease for the campaign; acquires on first use. */
+  private controllerLease(campaignId: string, leaseMs = this.config.run_lease_ms): ControllerLease {
+    const held = this.controllerLeases.get(campaignId);
+    if (held) return held;
+    const { generation } = this.storage.acquireControllerLock(campaignId, this.config.instance_id, leaseMs);
+    const lease: ControllerLease = { campaign_id: campaignId, owner: this.config.instance_id, generation };
+    this.controllerLeases.set(campaignId, lease);
+    return lease;
+  }
+
+  /** Campaigns currently driven by start(); direct runDecide/runExecuteSlot
+   *  calls outside start() release their lease when the one-shot ends so a
+   *  later controller (or test seeder) is never blocked by an idle engine. */
+  private readonly drivingCampaigns = new Set<string>();
+
+  private releaseControllerLease(campaignId: string): void {
+    const held = this.controllerLeases.get(campaignId);
+    if (!held) return;
+    this.controllerLeases.delete(campaignId);
+    try {
+      this.storage.releaseControllerLock(campaignId, held.owner, held.generation);
+    } catch {
+      // storage closing; the TTL reclaims it
+    }
+  }
+
+  /** Ownership lost: stop refilling and abort every worker this engine drives. */
+  private loseController(campaignId: string, reason: string): void {
+    this.controllerLeases.delete(campaignId);
+    for (const [runId, worker] of this.activeWorkers) {
+      try {
+        if (this.storage.getRun(runId).campaign_id === campaignId) worker.abort();
+      } catch {
+        // row gone or already stopped
+      }
+    }
+    this.log(`controller lost for ${campaignId}: ${reason}`);
   }
 
   private async startLocked(campaignId: string): Promise<void> {
@@ -393,6 +436,8 @@ export class Engine {
     const maxCycles = this.options.maxCycles ?? 1000;
     let decideAttemptedFor = -1;
     let lastDecideResolved = false;
+    this.drivingCampaigns.add(campaignId);
+    try {
     const active = new Map<string, Promise<unknown>>();
     const trackRun = (lease: RunLease): void => {
       const p = this.runWorker(lease)
@@ -407,7 +452,12 @@ export class Engine {
       const camp = this.storage.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused" || camp.state === "awaiting_verify") break;
       const polled = await this.pollOperations(campaignId);
-      this.storage.heartbeatControllerLock(campaignId, this.config.instance_id, this.config.run_lease_ms);
+      const ctrl = this.controllerLease(campaignId);
+      if (!this.storage.heartbeatControllerLock(campaignId, ctrl.owner, ctrl.generation, this.config.run_lease_ms)) {
+        // Ownership lost: stop refilling, abort local runs, leave the loop.
+        this.loseController(campaignId, "heartbeat_rejected");
+        break;
+      }
       this.storage.consumeReviewedEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
       const worldEarly = this.storage.getWorld<LabWorld>(campaignId, freshWorld());
@@ -477,7 +527,7 @@ export class Engine {
         const fresh = this.storage.getCampaign(campaignId);
         if (fresh.requested_seq > fresh.reviewed_seq && i > 0) break;
         if (fresh.state !== "active" && fresh.state !== "created") break;
-        const claimed = this.storage.claimNextStep(campaignId, this.config.instance_id, fresh.epoch, this.config.run_lease_ms);
+        const claimed = this.storage.claimNextStep(campaignId, ctrl, fresh.epoch, this.config.run_lease_ms);
         if (!claimed) break;
         const lease: RunLease = {
           run_id: claimed.run_id,
@@ -490,6 +540,7 @@ export class Engine {
           cancel_epoch: fresh.cancel_epoch,
           deadline_ms: this.leaseDeadline(fresh),
           lease_owner: this.config.instance_id,
+          controller_generation: claimed.controller_generation,
           continuation_of: null,
         };
         trackRun(lease);
@@ -568,6 +619,9 @@ export class Engine {
         break;
       }
     }
+    } finally {
+      this.drivingCampaigns.delete(campaignId);
+    }
     const final = this.storage.getCampaign(campaignId);
     if (!this.storage.latestReport(campaignId)) {
       this.writeReport(campaignId, final.state);
@@ -575,43 +629,57 @@ export class Engine {
   }
 
   async runDecide(campaignId: string): Promise<TaskOutcome | null> {
-    const claimed = this.storage.claimDecide(campaignId, this.config.instance_id, this.config.run_lease_ms);
-    if (!claimed) return null;
-    const camp = this.storage.getCampaign(campaignId);
-    const lease: RunLease = {
-      run_id: claimed.run_id,
-      campaign_id: campaignId,
-      step_id: null,
-      mode: "decide",
-      kind: "decide",
-      attempt_no: 1,
-      fence: claimed.fence,
-      cancel_epoch: camp.cancel_epoch,
-      deadline_ms: this.leaseDeadline(camp),
-      lease_owner: this.config.instance_id,
-      continuation_of: null,
-    };
-    return this.runWorker(lease);
+    const direct = !this.drivingCampaigns.has(campaignId);
+    const ctrl = this.controllerLease(campaignId);
+    try {
+      const claimed = this.storage.claimDecide(campaignId, ctrl, this.config.run_lease_ms);
+      if (!claimed) return null;
+      const camp = this.storage.getCampaign(campaignId);
+      const lease: RunLease = {
+        run_id: claimed.run_id,
+        campaign_id: campaignId,
+        step_id: null,
+        mode: "decide",
+        kind: "decide",
+        attempt_no: 1,
+        fence: claimed.fence,
+        cancel_epoch: camp.cancel_epoch,
+        deadline_ms: this.leaseDeadline(camp),
+        lease_owner: this.config.instance_id,
+        controller_generation: claimed.controller_generation,
+        continuation_of: null,
+      };
+      return await this.runWorker(lease);
+    } finally {
+      if (direct) this.releaseControllerLease(campaignId);
+    }
   }
 
   async runExecuteSlot(campaignId: string): Promise<TaskOutcome | null> {
-    const camp = this.storage.getCampaign(campaignId);
-    const claimed = this.storage.claimNextStep(campaignId, this.config.instance_id, camp.epoch, this.config.run_lease_ms);
-    if (!claimed) return null;
-    const lease: RunLease = {
-      run_id: claimed.run_id,
-      campaign_id: campaignId,
-      step_id: claimed.step_id,
-      mode: "execute",
-      kind: claimed.kind,
-      attempt_no: claimed.attempt_no,
-      fence: claimed.fence,
-      cancel_epoch: camp.cancel_epoch,
-      deadline_ms: this.leaseDeadline(camp),
-      lease_owner: this.config.instance_id,
-      continuation_of: null,
-    };
-    return this.runWorker(lease);
+    const direct = !this.drivingCampaigns.has(campaignId);
+    const ctrl = this.controllerLease(campaignId);
+    try {
+      const camp = this.storage.getCampaign(campaignId);
+      const claimed = this.storage.claimNextStep(campaignId, ctrl, camp.epoch, this.config.run_lease_ms);
+      if (!claimed) return null;
+      const lease: RunLease = {
+        run_id: claimed.run_id,
+        campaign_id: campaignId,
+        step_id: claimed.step_id,
+        mode: "execute",
+        kind: claimed.kind,
+        attempt_no: claimed.attempt_no,
+        fence: claimed.fence,
+        cancel_epoch: camp.cancel_epoch,
+        deadline_ms: this.leaseDeadline(camp),
+        lease_owner: this.config.instance_id,
+        controller_generation: claimed.controller_generation,
+        continuation_of: null,
+      };
+      return await this.runWorker(lease);
+    } finally {
+      if (direct) this.releaseControllerLease(campaignId);
+    }
   }
 
   private leaseDeadline(camp: { spec: CampaignSpec }): number {
@@ -629,9 +697,23 @@ export class Engine {
     // If the process dies the renewals stop, and recoverStaleRuns reclaims the
     // run within ~run_lease_ms instead of the full controller-lock TTL.
     const camp = this.storage.getCampaign(lease.campaign_id);
+    const workerCtrl: ControllerLease | null =
+      lease.controller_generation != null
+        ? { campaign_id: lease.campaign_id, owner: lease.lease_owner, generation: lease.controller_generation }
+        : null;
     const heartbeat = setInterval(() => {
+      if (!workerCtrl) return; // pre-v6 lease: cannot renew, expiry reclaims it
       try {
-        this.storage.heartbeatRun(lease.run_id, this.leaseDeadline(camp));
+        const renewed = this.storage.heartbeatRun(workerCtrl, { run_id: lease.run_id, fence: lease.fence }, this.leaseDeadline(camp));
+        if (!renewed.renewed) {
+          // Lease lost: stop this worker admitting new calls; the settle path
+          // records the outcome. Never keep working after a failed renewal.
+          try {
+            worker.abort();
+          } catch {
+            // already stopped
+          }
+        }
       } catch {
         // DB closing or run row gone; the settle path surfaces real errors.
       }

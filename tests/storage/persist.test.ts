@@ -37,7 +37,7 @@ test("T08/T09 idempotent submit and conflict", async () => {
   const engine = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 2 });
   const spec = loadDemoSpec("camp_idem");
   engine.createCampaign(spec);
-  const run = engine.storage.claimDecide(spec.campaign_id, "t");
+  const run = engine.storage.claimDecideAsOwner(spec.campaign_id, "t");
   assert.ok(run);
   const payload = {
     campaign_id: spec.campaign_id,
@@ -74,8 +74,8 @@ test("T10 cross-campaign fact ref is rejected", () => {
   const b = loadDemoSpec("camp_b");
   engine.createCampaign(a);
   engine.createCampaign(b);
-  const runA = engine.storage.claimDecide(a.campaign_id, "t");
-  const runB = engine.storage.claimDecide(b.campaign_id, "t");
+  const runA = engine.storage.claimDecideAsOwner(a.campaign_id, "t");
+  const runB = engine.storage.claimDecideAsOwner(b.campaign_id, "t");
   assert.ok(runA && runB);
   const art = { campaign_id: a.campaign_id, producer_id: "p", submission_id: "o1", run_id: runA.run_id, attempt_id: runA.run_id, subject: "x", body: {}, artifact_refs: [] as string[], conditions: {}, env_rev: "e" };
   const obs = engine.storage.recordObservation(art);
@@ -118,7 +118,7 @@ test("T22 crash reload keeps committed graph", () => {
   const spec = loadDemoSpec("camp_crash");
   const e1 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
   e1.createCampaign(spec);
-  const run = e1.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e1.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const obs = e1.storage.recordObservation({
     campaign_id: spec.campaign_id,
     producer_id: "p",
@@ -164,7 +164,7 @@ test("context pack observations are newest first; graph_query defaults to oldest
   const e = open(dir);
   const spec = loadDemoSpec("camp_obs_order");
   e.createCampaign(spec);
-  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   for (let i = 0; i < 25; i++) {
     e.storage.recordObservation({
       campaign_id: spec.campaign_id,
@@ -194,6 +194,7 @@ test("context pack observations are newest first; graph_query defaults to oldest
     cancel_epoch: 0,
     deadline_ms: Date.now() + 1000,
     lease_owner: "t",
+    controller_generation: null,
     continuation_of: null,
   });
   const packed = JSON.stringify(pack.user_payload);
@@ -235,7 +236,7 @@ test("F22 finish_requested without payload recovers incomplete not resolved", ()
   const e = open(dir);
   const spec = loadDemoSpec("f22");
   e.createCampaign(spec);
-  const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const decide = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
@@ -266,7 +267,7 @@ test("F22 finish_requested without payload recovers incomplete not resolved", ()
     finish_requested: true,
     protocol_error: null,
   });
-  const claimed = e.storage.claimNextStep(spec.campaign_id, "t", 1)!;
+  const claimed = e.storage.claimNextStepAsOwner(spec.campaign_id, "t", 1)!;
   e.storage.markFinishRequested(spec.campaign_id, claimed.run_id, claimed.fence);
   e.storage.recoverStaleRuns(spec.campaign_id);
   const run = e.storage.getRun(claimed.run_id);
@@ -300,8 +301,7 @@ test("F23 repeat recovery does not duplicate events or step revision", () => {
   e.close();
 });
 
-test("F24 v2 database opens at schema 5 with rows intact", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rn-f24-"));
+test("F24 v2 database opens at schema 6 with rows intact", () => {  const dir = mkdtempSync(join(tmpdir(), "rn-f24-"));
   const path = join(dir, "rionext.sqlite");
   mkdirSync(dir, { recursive: true });
   const db = new DatabaseSync(path);
@@ -357,15 +357,16 @@ test("F24 v2 database opens at schema 5 with rows intact", () => {
   ).run(Date.now() + 60_000, new Date().toISOString(), new Date().toISOString());
   db.close();
   const store = new Store(path);
-  assert.equal(store.schemaVersion(), 5);
+  assert.equal(store.schemaVersion(), 6);
   const camp = store.db.prepare("SELECT id, state FROM campaigns WHERE id = ?").get("camp_f24") as { id: string; state: string };
   assert.equal(camp.id, "camp_f24");
   assert.equal(camp.state, "created");
-  const run = store.db.prepare("SELECT id, finish_payload_json, finalize_attempted, last_error FROM task_runs WHERE id = ?").get("run_f24") as {
+  const run = store.db.prepare("SELECT id, finish_payload_json, finalize_attempted, last_error, controller_generation FROM task_runs WHERE id = ?").get("run_f24") as {
     id: string;
     finish_payload_json: string | null;
     finalize_attempted: number;
     last_error: string | null;
+    controller_generation: number | null;
   };
   assert.equal(run.id, "run_f24");
   assert.equal(run.finish_payload_json, null);
@@ -379,7 +380,7 @@ test("F25 identical submission_id replays; different payload cannot overwrite", 
   const e = open(dir);
   const spec = loadDemoSpec("f25");
   e.createCampaign(spec);
-  const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const decide = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   e.storage.proposeStepDirect({
     campaign_id: spec.campaign_id,
@@ -410,7 +411,7 @@ test("F25 identical submission_id replays; different payload cannot overwrite", 
     finish_requested: true,
     protocol_error: null,
   });
-  const claimed = e.storage.claimNextStep(spec.campaign_id, "t", 1)!;
+  const claimed = e.storage.claimNextStepAsOwner(spec.campaign_id, "t", 1)!;
   const payload = { disposition: "deferred" as const, summary: "one", next_action: "later", evidence_refs: [] };
   const a = e.storage.submitRunOutcome({
     campaign_id: spec.campaign_id,
@@ -460,7 +461,7 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
   const e = open(dir);
   const spec = loadAssessmentSpec("f36");
   e.createCampaign(spec);
-  const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const decide = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
   const covId = String(
     e.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk")!.id,
@@ -508,7 +509,7 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
     conditions: {},
     env_rev: "env-1",
   });
-  const claimed = e.storage.claimNextStep(spec.campaign_id, "t", 1)!;
+  const claimed = e.storage.claimNextStepAsOwner(spec.campaign_id, "t", 1)!;
   // a resolved run without an explicit coverage_result marks nothing
   const plain = e.storage.submitRunOutcome({
     campaign_id: spec.campaign_id,
@@ -538,7 +539,7 @@ test("F36 recovered resolved execute applies explicit coverage results only", as
   // supporting observation is produced by the run that cites it
   e2.storage.store.db.prepare("UPDATE steps SET status = 'ready' WHERE fingerprint = 'f36-fp'").run();
 
-  const claimed2 = e2.storage.claimNextStep(spec.campaign_id, "t", e2.storage.getCampaign(spec.campaign_id).epoch)!;
+  const claimed2 = e2.storage.claimNextStepAsOwner(spec.campaign_id, "t", e2.storage.getCampaign(spec.campaign_id).epoch)!;
   const obs2 = e2.storage.recordObservation({
     campaign_id: spec.campaign_id,
     producer_id: "t",
@@ -582,7 +583,7 @@ test("checkpoint lookup does not return another step's note", () => {
   const e = open(dir);
   const spec = loadDemoSpec("ckpt-iso");
   e.createCampaign(spec);
-  const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const decide = e.storage.claimDecideAsOwner(spec.campaign_id, "t")!;
   e.storage.saveCheckpoint({
     campaign_id: spec.campaign_id,
     run_id: decide.run_id,
@@ -603,11 +604,16 @@ test("heartbeatRun renews a live lease and cannot resurrect a reclaimed run", ()
   try {
     const spec = loadDemoSpec("hb");
     e.createCampaign(spec);
-    const run = e.storage.claimDecide(spec.campaign_id, "t")!;
-    // A live renewal pushes the deadline out; recoverStaleRuns leaves it alone.
+    // Hold the controller lock for the whole test: run renewal requires it.
+    const acq = e.storage.acquireControllerLock(spec.campaign_id, "t", 60_000);
+    const ctrl = { campaign_id: spec.campaign_id, owner: "t", generation: acq.generation };
+    const run = e.storage.claimDecide(spec.campaign_id, ctrl)!;
+    // A live renewal is accepted; the deadline only ever extends, so the
+    // claimed 1h deadline stands over the smaller requested one (L16).
     const later = Date.now() + 120_000;
-    e.storage.heartbeatRun(run.run_id, later);
-    assert.equal(Number(e.storage.getRun(run.run_id).deadline_ms), later);
+    const renewed = e.storage.heartbeatRun(ctrl, { run_id: run.run_id, fence: run.fence }, later);
+    assert.ok(renewed.renewed);
+    assert.ok(Number(e.storage.getRun(run.run_id).deadline_ms) >= later);
     assert.equal(e.storage.recoverStaleRuns(spec.campaign_id), 0);
     // Simulate a crashed worker: the deadline lapses with no renewal.
     e.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = 0 WHERE id = ?").run(run.run_id);
@@ -615,7 +621,8 @@ test("heartbeatRun renews a live lease and cannot resurrect a reclaimed run", ()
     assert.equal(e.storage.getRun(run.run_id).state, "lease_expired");
     // A late heartbeat from the dead worker must not steal the lease back.
     const resurrect = Date.now() + 120_000;
-    e.storage.heartbeatRun(run.run_id, resurrect);
+    const late = e.storage.heartbeatRun(ctrl, { run_id: run.run_id, fence: run.fence }, resurrect);
+    assert.ok(!late.renewed, "an expired run is never revived by a heartbeat");
     assert.notEqual(Number(e.storage.getRun(run.run_id).deadline_ms), resurrect);
     assert.equal(e.storage.getRun(run.run_id).state, "lease_expired");
   } finally {
@@ -630,7 +637,7 @@ test("run claims use the short run lease, not the controller-lock TTL", () => {
     const spec = loadDemoSpec("rl");
     e.createCampaign(spec);
     const before = Date.now();
-    const run = e.storage.claimDecide(spec.campaign_id, "t", e.config.run_lease_ms)!;
+    const run = e.storage.claimDecideAsOwner(spec.campaign_id, "t", e.config.run_lease_ms)!;
     const deadline = Number(e.storage.getRun(run.run_id).deadline_ms);
     assert.ok(deadline - before <= e.config.run_lease_ms + 1000, `deadline too far out: ${deadline - before}`);
     assert.equal(e.config.run_lease_ms, 120_000);

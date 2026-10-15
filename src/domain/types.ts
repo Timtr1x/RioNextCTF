@@ -376,6 +376,13 @@ export interface ContextManifest {
   context_hash: string;
 }
 
+/** Controller ownership of a campaign: one owner + one generation at a time. */
+export interface ControllerLease {
+  campaign_id: string;
+  owner: string;
+  generation: number;
+}
+
 export interface RunLease {
   run_id: string;
   campaign_id: string;
@@ -387,8 +394,12 @@ export interface RunLease {
   cancel_epoch: number;
   deadline_ms: number;
   lease_owner: string;
+  /** Controller generation this run was claimed under; null for pre-v6 rows. */
+  controller_generation: number | null;
   continuation_of: string | null;
 }
+
+export type RenewResult = { renewed: true; deadline_ms: number } | { renewed: false; reason: string };
 
 export const CAMPAIGN_TRANSITIONS: Record<CampaignState, CampaignState[]> = {
   created: ["active", "paused", "cancelled"],

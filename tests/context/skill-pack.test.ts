@@ -28,6 +28,7 @@ function lease(campaignId: string, mode: "decide" | "execute", stepId: string | 
     cancel_epoch: 0,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "test",
+    controller_generation: null,
     continuation_of: null,
   };
 }
@@ -67,7 +68,7 @@ test("giant observation bodies are capped so the context pack always fits", () =
     });
     e.createCampaign(spec);
     e.storage.setCampaignState("camp_fat", "active", { kind: "user", id: "t" });
-    const run = e.storage.claimDecide("camp_fat", "t")!;
+    const run = e.storage.claimDecideAsOwner("camp_fat", "t")!;
     // 20 observations with 100k bodies each: 2MB of raw bodies, 5x the global cap.
     for (let i = 0; i < 20; i++) {
       e.storage.recordObservation({

@@ -6,7 +6,7 @@ const data = process.argv[2]!;
 const spec = JSON.parse(readFileSync(process.argv[3]!, "utf8")) as { campaign_id: string };
 const e = new Engine(makeRuntimeConfig(data), { silent: true, maxCycles: 1 });
 e.createCampaign(spec);
-const run = e.storage.claimDecide(spec.campaign_id, "child")!;
+const run = e.storage.claimDecideAsOwner(spec.campaign_id, "child")!;
 e.storage.recordObservation({
   campaign_id: spec.campaign_id,
   producer_id: "child",

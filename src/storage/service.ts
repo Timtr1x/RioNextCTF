@@ -11,6 +11,7 @@ import type {
   CampaignRecord,
   CampaignSpec,
   CampaignState,
+  ControllerLease,
   CoverageApplicability,
   CoverageEvidenceState,
   CoverageExecutionState,
@@ -23,6 +24,7 @@ import type {
   PredicateExpr,
   ProposalOp,
   ReadSetEntry,
+  RenewResult,
   StepKind,
   StepStatus,
   SubmitFactResultStatus,
@@ -98,6 +100,13 @@ export class StorageService {
     this.store.close();
   }
 
+  /**
+   * Controller ownership. One owner/generation at a time. A same-owner
+   * re-acquire while the lease is still valid keeps the generation; any
+   * acquire after expiry starts a new generation, even for the same owner
+   * string. The lock row is never deleted — release only expires it — so
+   * generations can never reset by delete+insert.
+   */
   acquireControllerLock(campaignId: string, owner: string, leaseMs = 60_000): { generation: number; takeover: boolean } {
     return this.store.transaction(() => {
       const now = Date.now();
@@ -116,16 +125,22 @@ export class StorageService {
           .run(campaignId, owner, iso, iso, until);
         return { generation: 1, takeover: false };
       }
-      if (existing.owner === owner) {
+      // Unified expiry: lease_until <= now means invalid (H03 §5.3). Pre-v2
+      // rows have no lease_until: fall back to heartbeat staleness there only.
+      const expired =
+        existing.lease_until != null
+          ? Number(existing.lease_until) <= now
+          : existing.heartbeat_at
+            ? now - Date.parse(existing.heartbeat_at) > leaseMs
+            : true;
+      if (existing.owner === owner && !expired) {
         this.store.db
-          .prepare("UPDATE controller_locks SET heartbeat_at = ?, lease_until = ? WHERE campaign_id = ?")
-          .run(iso, until, campaignId);
+          .prepare("UPDATE controller_locks SET heartbeat_at = ?, lease_until = ? WHERE campaign_id = ? AND owner = ? AND generation = ?")
+          .run(iso, until, campaignId, owner, Number(existing.generation ?? 1));
         return { generation: Number(existing.generation ?? 1), takeover: false };
       }
-      const expired = existing.lease_until != null && Number(existing.lease_until) < now;
-      const heartbeatMs = existing.heartbeat_at ? Date.parse(existing.heartbeat_at) : 0;
-      const staleHeartbeat = heartbeatMs > 0 && now - heartbeatMs > leaseMs;
-      if (!expired && !staleHeartbeat) {
+      if (!expired) {
+        // lease_until is the single authority; heartbeat_at is diagnostic only.
         throw denied("controller_lock_held", "another controller owns this campaign", { owner: existing.owner });
       }
       const generation = Number(existing.generation ?? 1) + 1;
@@ -138,57 +153,42 @@ export class StorageService {
     });
   }
 
-  heartbeatControllerLock(campaignId: string, owner: string, leaseMs = 60_000): void {
+  /** Renew the controller lease. False means ownership was lost — the caller
+   *  must stop admitting new work. A heartbeat never revives an expired lock. */
+  heartbeatControllerLock(campaignId: string, owner: string, generation: number, leaseMs = 60_000): boolean {
     const iso = nowIso();
-    const until = Date.now() + leaseMs;
+    const now = Date.now();
+    const until = now + leaseMs;
     const row = this.store.db
-      .prepare("UPDATE controller_locks SET heartbeat_at = ?, lease_until = ? WHERE campaign_id = ? AND owner = ?")
-      .run(iso, until, campaignId, owner);
-    void row;
+      .prepare(
+        "UPDATE controller_locks SET heartbeat_at = ?, lease_until = ? WHERE campaign_id = ? AND owner = ? AND generation = ? AND lease_until > ?",
+      )
+      .run(iso, until, campaignId, owner, generation, now);
+    return Number(row.changes) > 0;
   }
 
-  releaseControllerLock(campaignId: string, owner: string): void {
-    this.store.db.prepare("DELETE FROM controller_locks WHERE campaign_id = ? AND owner = ?").run(campaignId, owner);
+  /** Expire the lock only if this generation still owns it — an old owner's
+   *  finally can never release a successor's lock. The row stays. */
+  releaseControllerLock(campaignId: string, owner: string, generation?: number): void {
+    if (generation == null) {
+      this.store.db
+        .prepare("UPDATE controller_locks SET lease_until = 0 WHERE campaign_id = ? AND owner = ?")
+        .run(campaignId, owner);
+      return;
+    }
+    this.store.db
+      .prepare("UPDATE controller_locks SET lease_until = 0 WHERE campaign_id = ? AND owner = ? AND generation = ?")
+      .run(campaignId, owner, generation);
   }
 
   releaseAllControllerLocks(owner: string): void {
-    this.store.db.prepare("DELETE FROM controller_locks WHERE owner = ?").run(owner);
+    this.store.db.prepare("UPDATE controller_locks SET lease_until = 0 WHERE owner = ?").run(owner);
   }
 
   recoverStaleRuns(campaignId: string): number {
     return this.store.transaction(() => {
       const recoveredFinishes = this.recoverPendingFinishesTx(campaignId);
-      const now = Date.now();
-      const stale = this.store.db
-        .prepare(
-          "SELECT id, step_id, mode FROM task_runs WHERE campaign_id = ? AND state IN ('claimed','running') AND deadline_ms < ?",
-        )
-        .all(campaignId, now) as { id: string; step_id: string | null; mode: string }[];
-      const iso = nowIso();
-      let n = recoveredFinishes;
-      for (const run of stale) {
-        this.store.db
-          .prepare("UPDATE task_runs SET state = 'lease_expired', end_reason = 'controller_takeover', updated_at = ? WHERE id = ?")
-          .run(iso, run.id);
-        if (run.mode === "decide") {
-          this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = NULL, updated_at = ? WHERE id = ?").run(iso, campaignId);
-        } else {
-          this.store.db
-            .prepare(
-              "UPDATE campaigns SET execute_lock_owner = NULL, execute_run_id = NULL, updated_at = ? WHERE id = ? AND (execute_run_id = ? OR execute_run_id IS NULL)",
-            )
-            .run(iso, campaignId, run.id);
-          if (run.step_id) {
-            this.store.db
-              .prepare(
-                "UPDATE steps SET status = 'deferred', last_failure = 'controller_takeover', active_run_id = NULL, revision = revision + 1 WHERE id = ? AND status IN ('leased','running') AND (active_run_id = ? OR active_run_id IS NULL)",
-              )
-              .run(run.step_id, run.id);
-          }
-        }
-        n += 1;
-      }
-      return n;
+      return recoveredFinishes + this.revokeExpiredRunsTx(campaignId);
     });
   }
 
@@ -197,14 +197,53 @@ export class StorageService {
   }
 
   /**
-   * Renew a live run's lease. The WHERE clause refuses to touch a run that was
-   * already finished or reclaimed, so a partitioned worker cannot steal its
-   * own lease back from a controller takeover.
+   * Renew a live run's lease (H03 §5.5). Every authority condition is in the
+   * WHERE: the caller's owner, controller generation and fence must match, the
+   * run must be live and not yet expired (an expired run can never be
+   * revived), the controller lock must still be held by the same
+   * owner/generation, and the campaign must not have crossed the cancel epoch
+   * or reached a terminal state. The new deadline only ever extends, and never
+   * past the campaign's hard deadline.
    */
-  heartbeatRun(runId: string, deadlineMs: number): void {
-    this.store.db
-      .prepare("UPDATE task_runs SET deadline_ms = ?, updated_at = ? WHERE id = ? AND state IN ('claimed','running')")
-      .run(deadlineMs, nowIso(), runId);
+  heartbeatRun(ctrl: ControllerLease, run: { run_id: string; fence: number }, deadlineMs: number): RenewResult {
+    return this.store.transaction(() => {
+      const now = Date.now();
+      const camp = this.getCampaign(ctrl.campaign_id);
+      if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused" || camp.state === "budget_paused") {
+        return { renewed: false, reason: `campaign_${camp.state}` };
+      }
+      const capAt = camp.spec.budget.deadline_ms != null ? Math.min(deadlineMs, Number(camp.spec.budget.deadline_ms)) : deadlineMs;
+      const row = this.store.db
+        .prepare(
+          `UPDATE task_runs SET deadline_ms = MAX(deadline_ms, ?), updated_at = ?
+           WHERE id = ? AND campaign_id = ?
+             AND lease_owner = ?
+             AND fence = ?
+             AND state IN ('claimed','running')
+             AND deadline_ms > ?
+             AND controller_generation = ?
+             AND EXISTS (
+               SELECT 1 FROM controller_locks cl
+               WHERE cl.campaign_id = ? AND cl.owner = ? AND cl.generation = ? AND cl.lease_until > ?
+             )`,
+        )
+        .run(
+          capAt,
+          nowIso(),
+          run.run_id,
+          ctrl.campaign_id,
+          ctrl.owner,
+          run.fence,
+          now,
+          ctrl.generation,
+          ctrl.campaign_id,
+          ctrl.owner,
+          ctrl.generation,
+          now,
+        );
+      if (Number(row.changes) === 0) return { renewed: false, reason: "lease_lost" };
+      return { renewed: true, deadline_ms: capAt };
+    });
   }
 
   private recoverPendingFinishesTx(campaignId: string): number {
@@ -1264,27 +1303,38 @@ export class StorageService {
 
   /**
    * Claim one ready step with a fresh run. Admission authority is the live run
-   * set (claimed/running, not yet expired) capped by the campaign's
-   * execution_policy, plus a per-step CAS: a step runs at most one active run.
-   * The legacy campaigns.execute_* fields are still written for old readers but
-   * no longer gate admission.
+   * set plus recovery slots (expired runs with unaccounted external calls still
+   * hold their slot, I07), capped by the campaign's execution_policy, plus a
+   * per-step CAS: a step runs at most one active run. The caller must prove
+   * current controller ownership: claim is refused inside the same transaction
+   * when the controller lock has moved on (L01). Decide/Execute mutual
+   * exclusion is enforced here, not just by engine call order (L14).
+   * The legacy campaigns.execute_* fields are still written for old readers
+   * but no longer gate admission.
    */
-  claimNextStep(campaignId: string, owner: string, fenceSeed: number, leaseMs = 60 * 60_000): { step_id: string; run_id: string; fence: number; kind: StepKind; question: string; attempt_no: number } | null {
+  claimNextStep(
+    campaignId: string,
+    ctrl: ControllerLease,
+    fenceSeed: number,
+    leaseMs = 60 * 60_000,
+  ): { step_id: string; run_id: string; fence: number; controller_generation: number; kind: StepKind; question: string; attempt_no: number } | null {
     return this.store.transaction(() => {
+      if (!this.controllerLeaseValidTx(ctrl)) {
+        this.appendEvent(campaignId, "run.lease_rejected", { op: "claim_execute", generation: ctrl.generation }, { kind: "controller", id: ctrl.owner });
+        return null;
+      }
       if (!this.admissionOpen(campaignId)) return null;
       const camp = this.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "paused" || camp.state === "budget_paused" || camp.state === "completed") {
         return null;
       }
+      // Revoke expired runs before counting: a slot is reused only after the
+      // old run is fenced off, and only when no unknown external calls remain.
+      this.revokeExpiredRunsTx(campaignId);
       const maxWorkers = Math.max(1, Math.min(8, camp.spec.execution_policy?.max_execute_workers ?? 1));
-      const live = Number(
-        (this.store.db
-          .prepare(
-            "SELECT COUNT(*) AS c FROM task_runs WHERE campaign_id = ? AND mode = 'execute' AND state IN ('claimed','running') AND deadline_ms > ?",
-          )
-          .get(campaignId, Date.now()) as { c: number }).c,
-      );
-      if (live >= maxWorkers) return null;
+      const occupied = this.occupiedExecuteSlotsTx(campaignId);
+      if (occupied >= maxWorkers) return null;
+      if (this.liveDecideExistsTx(campaignId)) return null;
       this.recomputeStepReadiness(campaignId);
       // Skip steps whose declared resources conflict with a running step's.
       // First version: exclusive beats anything on the same key; shared+shared
@@ -1323,24 +1373,127 @@ export class StorageService {
       const fence = fenceSeed + attempt;
       this.store.db
         .prepare(
-          `INSERT INTO task_runs(id, campaign_id, step_id, mode, kind, attempt_no, lease_owner, fence, deadline_ms, state, continuation_of, finish_requested, env_admission, created_at, updated_at)
-           VALUES (?, ?, ?, 'execute', ?, ?, ?, ?, ?, 'claimed', NULL, 0, 1, ?, ?)`,
+          `INSERT INTO task_runs(id, campaign_id, step_id, mode, kind, attempt_no, lease_owner, fence, deadline_ms, controller_generation, state, continuation_of, finish_requested, env_admission, created_at, updated_at)
+           VALUES (?, ?, ?, 'execute', ?, ?, ?, ?, ?, ?, 'claimed', NULL, 0, 1, ?, ?)`,
         )
-        .run(runId, campaignId, step.id, step.kind, attempt, owner, fence, Date.now() + leaseMs, now, now);
+        .run(runId, campaignId, step.id, step.kind, attempt, ctrl.owner, fence, Date.now() + leaseMs, ctrl.generation, now, now);
       this.store.db
         .prepare("UPDATE campaigns SET execute_lock_owner = ?, execute_run_id = ?, updated_at = ? WHERE id = ?")
-        .run(owner, runId, now, campaignId);
-      this.appendEvent(campaignId, "run.claimed", { run_id: runId, step_id: step.id }, { kind: "controller", id: owner }, runId);
+        .run(ctrl.owner, runId, now, campaignId);
+      this.appendEvent(campaignId, "run.claimed", { run_id: runId, step_id: step.id }, { kind: "controller", id: ctrl.owner }, runId);
       this.store.db.prepare("UPDATE steps SET status = 'running', active_run_id = ?, revision = revision + 1 WHERE id = ?").run(runId, step.id);
       this.store.db.prepare("UPDATE task_runs SET state = 'running', updated_at = ? WHERE id = ?").run(now, runId);
-      return { step_id: step.id, run_id: runId, fence, kind: step.kind, question: step.question, attempt_no: attempt };
+      return { step_id: step.id, run_id: runId, fence, controller_generation: ctrl.generation, kind: step.kind, question: step.question, attempt_no: attempt };
     });
   }
 
-  claimDecide(campaignId: string, owner: string, leaseMs = 60 * 60_000): { run_id: string; fence: number } | null {
+  /**
+   * Convenience for callers that do not already hold the controller lock:
+   * acquire, claim, then expire the lock again so a one-off seed/verify claim
+   * never blocks the real controller. Not a bypass — the lock acquisition is
+   * the proof, and the claim itself is still fenced by it.
+   */
+  claimNextStepAsOwner(campaignId: string, owner: string, fenceSeed: number, leaseMs = 60 * 60_000) {
+    const { generation } = this.acquireControllerLock(campaignId, owner, leaseMs);
+    try {
+      return this.claimNextStep(campaignId, { campaign_id: campaignId, owner, generation }, fenceSeed, leaseMs);
+    } finally {
+      this.releaseControllerLock(campaignId, owner, generation);
+    }
+  }
+
+  /** The controller lock row currently matches owner+generation and is unexpired. */
+  private controllerLeaseValidTx(ctrl: ControllerLease): boolean {
+    const row = this.store.db
+      .prepare("SELECT 1 FROM controller_locks WHERE campaign_id = ? AND owner = ? AND generation = ? AND lease_until > ?")
+      .get(ctrl.campaign_id, ctrl.owner, ctrl.generation, Date.now());
+    return Boolean(row);
+  }
+
+  /** Live plus recovering execute runs — the real slot occupation (I07). */
+  private occupiedExecuteSlotsTx(campaignId: string): number {
+    const now = Date.now();
+    const live = Number(
+      (this.store.db
+        .prepare("SELECT COUNT(*) AS c FROM task_runs WHERE campaign_id = ? AND mode = 'execute' AND state IN ('claimed','running') AND deadline_ms > ?")
+        .get(campaignId, now) as { c: number }).c,
+    );
+    const recovering = Number(
+      (this.store.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM task_runs tr
+           WHERE tr.campaign_id = ? AND tr.mode = 'execute' AND tr.state = 'lease_expired'
+             AND EXISTS (SELECT 1 FROM invocations i WHERE i.run_id = tr.id AND i.state IN ('prepared','dispatching','running','uncertain'))`,
+        )
+        .get(campaignId) as { c: number }).c,
+    );
+    return live + recovering;
+  }
+
+  private liveDecideExistsTx(campaignId: string): boolean {
+    const now = Date.now();
+    const row = this.store.db
+      .prepare("SELECT 1 FROM task_runs WHERE campaign_id = ? AND mode = 'decide' AND state IN ('claimed','running') AND deadline_ms > ? LIMIT 1")
+      .get(campaignId, now);
+    return Boolean(row);
+  }
+
+  /** Expire-and-revoke every run whose deadline has passed (deadline <= now). */
+  private revokeExpiredRunsTx(campaignId: string): number {
+    const now = Date.now();
+    const stale = this.store.db
+      .prepare("SELECT id, step_id, mode FROM task_runs WHERE campaign_id = ? AND state IN ('claimed','running') AND deadline_ms <= ?")
+      .all(campaignId, now) as { id: string; step_id: string | null; mode: string }[];
+    const iso = nowIso();
+    for (const run of stale) {
+      this.store.db
+        .prepare("UPDATE task_runs SET state = 'lease_expired', end_reason = 'controller_takeover', updated_at = ? WHERE id = ?")
+        .run(iso, run.id);
+      if (run.mode === "decide") {
+        this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = NULL, updated_at = ? WHERE id = ?").run(iso, campaignId);
+      } else {
+        this.store.db
+          .prepare(
+            "UPDATE campaigns SET execute_lock_owner = NULL, execute_run_id = NULL, updated_at = ? WHERE id = ? AND (execute_run_id = ? OR execute_run_id IS NULL)",
+          )
+          .run(iso, campaignId, run.id);
+        if (run.step_id) {
+          const unknown = Number(
+            (this.store.db
+              .prepare("SELECT COUNT(*) AS c FROM invocations WHERE run_id = ? AND state IN ('dispatching','running','uncertain')")
+              .get(run.id) as { c: number }).c,
+          );
+          if (unknown > 0) {
+            // Unknown side effects may exist: park the step, do not reopen it.
+            this.store.db
+              .prepare(
+                "UPDATE steps SET status = 'deferred', last_failure = 'recovery_pending', active_run_id = NULL, revision = revision + 1 WHERE id = ? AND status IN ('leased','running') AND (active_run_id = ? OR active_run_id IS NULL)",
+              )
+              .run(run.step_id, run.id);
+          } else {
+            this.store.db
+              .prepare(
+                "UPDATE steps SET status = 'deferred', last_failure = 'controller_takeover', active_run_id = NULL, revision = revision + 1 WHERE id = ? AND status IN ('leased','running') AND (active_run_id = ? OR active_run_id IS NULL)",
+              )
+              .run(run.step_id, run.id);
+          }
+        }
+      }
+    }
+    return stale.length;
+  }
+
+  claimDecide(campaignId: string, ctrl: ControllerLease, leaseMs = 60 * 60_000): { run_id: string; fence: number; controller_generation: number } | null {
     return this.store.transaction(() => {
+      if (!this.controllerLeaseValidTx(ctrl)) {
+        this.appendEvent(campaignId, "run.lease_rejected", { op: "claim_decide", generation: ctrl.generation }, { kind: "controller", id: ctrl.owner });
+        return null;
+      }
       const camp = this.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "paused" || camp.state === "completed") return null;
+      // No Decide while any Execute fragment is live or still owes recovery.
+      this.revokeExpiredRunsTx(campaignId);
+      if (this.occupiedExecuteSlotsTx(campaignId) > 0) return null;
       const row = this.store.db.prepare("SELECT decide_lock_owner, requested_seq, reviewed_seq FROM campaigns WHERE id = ?").get(campaignId) as
         | { decide_lock_owner: string | null; requested_seq: number; reviewed_seq: number }
         | undefined;
@@ -1351,16 +1504,26 @@ export class StorageService {
       }
       const runId = newId("run");
       const now = nowIso();
-      this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = ?, updated_at = ? WHERE id = ?").run(owner, now, campaignId);
+      this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = ?, updated_at = ? WHERE id = ?").run(ctrl.owner, now, campaignId);
       this.store.db
         .prepare(
-          `INSERT INTO task_runs(id, campaign_id, step_id, mode, kind, attempt_no, lease_owner, fence, deadline_ms, state, continuation_of, finish_requested, env_admission, created_at, updated_at)
-           VALUES (?, ?, NULL, 'decide', 'decide', 1, ?, 1, ?, 'running', NULL, 0, 0, ?, ?)`,
+          `INSERT INTO task_runs(id, campaign_id, step_id, mode, kind, attempt_no, lease_owner, fence, deadline_ms, controller_generation, state, continuation_of, finish_requested, env_admission, created_at, updated_at)
+           VALUES (?, ?, NULL, 'decide', 'decide', 1, ?, 1, ?, ?, 'running', NULL, 0, 0, ?, ?)`,
         )
-        .run(runId, campaignId, owner, Date.now() + leaseMs, now, now);
-      this.appendEvent(campaignId, "run.claimed", { run_id: runId, mode: "decide" }, { kind: "controller", id: owner }, runId);
-      return { run_id: runId, fence: 1 };
+        .run(runId, campaignId, ctrl.owner, Date.now() + leaseMs, ctrl.generation, now, now);
+      this.appendEvent(campaignId, "run.claimed", { run_id: runId, mode: "decide" }, { kind: "controller", id: ctrl.owner }, runId);
+      return { run_id: runId, fence: 1, controller_generation: ctrl.generation };
     });
+  }
+
+  /** See claimNextStepAsOwner: lock acquisition first, claim, then expire it. */
+  claimDecideAsOwner(campaignId: string, owner: string, leaseMs = 60 * 60_000) {
+    const { generation } = this.acquireControllerLock(campaignId, owner, leaseMs);
+    try {
+      return this.claimDecide(campaignId, { campaign_id: campaignId, owner, generation }, leaseMs);
+    } finally {
+      this.releaseControllerLock(campaignId, owner, generation);
+    }
   }
 
   finishRun(campaignId: string, runId: string, outcome: TaskOutcome): { applied: boolean } {

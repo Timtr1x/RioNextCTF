@@ -92,7 +92,7 @@ test("a provider that fails twice is retried and the run still resolves", async 
   try {
     const spec = loadDemoSpec("retry-e2e");
     e.createCampaign(spec);
-    const decide = e.storage.claimDecide(spec.campaign_id, "seed")!;
+    const decide = e.storage.claimDecideAsOwner(spec.campaign_id, "seed")!;
     const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
     e.storage.proposeStepDirect({
       campaign_id: spec.campaign_id,

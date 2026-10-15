@@ -32,7 +32,7 @@ function boot(dir: string, id: string): Engine {
 }
 
 function leaseFor(e: Engine, campaignId: string): RunLease {
-  const run = e.storage.claimDecide(campaignId, "owner-a")!;
+  const run = e.storage.claimDecideAsOwner(campaignId, "owner-a")!;
   const root = String(e.storage.list("goals", campaignId)[0]!.id);
   e.storage.proposeStepDirect({
     campaign_id: campaignId,
@@ -49,7 +49,21 @@ function leaseFor(e: Engine, campaignId: string): RunLease {
     fingerprint: `fp-${Math.random()}`,
     reopen_rule: { kind: "never" },
   });
-  const claimed = e.storage.claimNextStep(campaignId, "owner-a", 1)!;
+  e.storage.finishRun(campaignId, run.run_id, {
+    run_id: run.run_id,
+    step_id: null,
+    mode: "decide",
+    reason: "resolved",
+    summary: "seed",
+    observation_ids: [],
+    fact_ids: [],
+    finding_ids: [],
+    blocked_on: null,
+    reopen_rule: null,
+    finish_requested: true,
+    protocol_error: null,
+  });
+  const claimed = e.storage.claimNextStepAsOwner(campaignId, "owner-a", 1)!;
   return {
     run_id: claimed.run_id,
     campaign_id: campaignId,
@@ -61,6 +75,7 @@ function leaseFor(e: Engine, campaignId: string): RunLease {
     cancel_epoch: e.storage.getCampaign(campaignId).cancel_epoch,
     deadline_ms: Date.now() + 60_000,
     lease_owner: "owner-a",
+    controller_generation: null,
     continuation_of: null,
   };
 }
