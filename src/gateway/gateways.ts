@@ -118,17 +118,17 @@ export class ModelGateway {
     const sem = this.sem!;
     return (async () => {
       // A queued worker must not wake up past its lease and still call the provider.
-      const remaining = Math.max(1, this.lease.deadline_ms - Date.now());
-      const won = await Promise.race([
-        sem.acquire().then(() => "slot" as const),
-        new Promise<"expired">((r) => setTimeout(() => r("expired"), remaining)),
-      ]);
-      if (won === "expired") return createScriptedErrorStream(callModel, "lease_expired");
+      let permit;
+      try {
+        permit = await sem.acquire({ deadlineAt: this.lease.deadline_ms });
+      } catch {
+        return createScriptedErrorStream(callModel, "lease_expired");
+      }
       let released = false;
       const release = (): void => {
         if (!released) {
           released = true;
-          sem.release();
+          permit.release();
         }
       };
       try {
